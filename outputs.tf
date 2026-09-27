@@ -24,6 +24,6 @@ output "origin_access_control_id" {
 }
 
 output "required_bucket_policy_json" {
-  description = "The exact IAM policy STATEMENT (not a full policy document) the origin bucket needs, as a JSON string: grants cloudfront.amazonaws.com s3:GetObject on the origin path, scoped by a Condition.StringEquals[\"AWS:SourceArn\"] to this distribution's own ARN. Merge it into aws.modules.s3's additional_bucket_policy_statements (jsondecode it first) or a standalone aws_s3_bucket_policy's statement list; this module cannot attach it itself because it does not own the bucket. A missing or wrong SourceArn here would let any CloudFront distribution in the account read the bucket, not just this one."
+  description = "The exact IAM policy STATEMENT (not a full policy document) the origin bucket needs, as a JSON string: grants cloudfront.amazonaws.com s3:GetObject on the origin path, scoped by a Condition.StringEquals[\"AWS:SourceArn\"] to this distribution's own ARN. Merge it (jsondecode it first) into a standalone aws_s3_bucket_policy's statement list, or translate it into aws.modules.s3's own typed bucket_policy_statements input (its principals and conditions fields have a different shape than raw IAM JSON); this module cannot attach it itself because it does not own the bucket. A missing or wrong SourceArn here would let any CloudFront distribution in the account read the bucket, not just this one."
   value       = jsonencode(local.bucket_policy_statement)
 }
