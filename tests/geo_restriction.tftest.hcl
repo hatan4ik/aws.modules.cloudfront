@@ -27,7 +27,7 @@ run "renders_a_whitelist" {
   variables {
     geo_restriction = {
       restriction_type = "whitelist"
-      locations         = ["US", "CA", "DE"]
+      locations        = ["US", "CA", "DE"]
     }
   }
 
@@ -43,7 +43,7 @@ run "renders_a_blacklist" {
   variables {
     geo_restriction = {
       restriction_type = "blacklist"
-      locations         = ["KP"]
+      locations        = ["KP"]
     }
   }
 

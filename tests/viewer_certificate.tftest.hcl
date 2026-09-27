@@ -35,8 +35,8 @@ run "uses_the_acm_certificate_with_sni_when_aliases_are_set" {
   command = plan
 
   variables {
-    aliases                 = ["app.example.com", "*.app.example.com"]
-    viewer_certificate_arn  = "arn:aws:acm:us-east-1:123456789012:certificate/11111111-2222-3333-4444-555555555555"
+    aliases                  = ["app.example.com", "*.app.example.com"]
+    viewer_certificate_arn   = "arn:aws:acm:us-east-1:123456789012:certificate/11111111-2222-3333-4444-555555555555"
     minimum_protocol_version = "TLSv1.2_2019"
   }
 
