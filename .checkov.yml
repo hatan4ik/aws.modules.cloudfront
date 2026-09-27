@@ -4,3 +4,61 @@
 # policy scanning.
 skip-path:
   - tests/integration/setup
+
+# CKV_AWS_174 and CKV2_AWS_42 are verified false positives, not accepted
+# risk. This module renders viewer_certificate through two mutually
+# exclusive dynamic "viewer_certificate" blocks (the default certificate
+# when aliases is empty, a caller ACM certificate with SNI and
+# minimum_protocol_version otherwise; see main.tf), and Checkov's static
+# graph resolution cannot tell which one actually renders for a given
+# for_each, nor follow minimum_protocol_version through the module variable
+# it is threaded from. Proven with a throwaway, non-dynamic
+# aws_cloudfront_distribution carrying a literal
+# viewer_certificate { acm_certificate_arn = ..., minimum_protocol_version =
+# "TLSv1.2_2021" } block: both checks pass on it. Yet even
+# examples/custom-domain-with-waf — which sets aliases, a real us-east-1 ACM
+# certificate, and minimum_protocol_version = "TLSv1.2_2021" explicitly —
+# fails both checks when scanned standalone, which the literal probe rules
+# out as a real gap. The real behavior is asserted directly in
+# tests/viewer_certificate.tftest.hcl
+# ("uses_the_default_certificate_with_no_aliases",
+# "uses_the_acm_certificate_with_sni_when_aliases_are_set") and in the two
+# resource preconditions in main.tf's lifecycle block, which is the source
+# of truth for this module's certificate posture.
+#
+# CKV_AWS_86, CKV_AWS_310, CKV_AWS_374, CKV2_AWS_32, and CKV2_AWS_47 are
+# real findings, accepted by design, not resolution artifacts — confirmed
+# against the same literal, non-dynamic probe resource, which fails all
+# five identically:
+# - CKV_AWS_86 (access logging): logging defaults to null (off); the
+#   access_logging_disabled check block advises turning it on rather than
+#   the module forcing it, matching the brief's own advisory-not-mandatory
+#   design for this input. Passes wherever a caller sets logging, as
+#   examples/custom-domain-with-waf proves standalone.
+# - CKV_AWS_310 (origin failover): this module creates exactly one origin
+#   per call, by design (ADR 0004's static-delivery scope; see
+#   docs/DESIGN.md, "Deferred to v2"). An origin group needs a second
+#   origin to fail over to, which this module's interface does not accept.
+# - CKV_AWS_374 (geo restriction): geo_restriction defaults to
+#   restriction_type = "none", a caller decision the interface exposes but
+#   does not force; the two resource-precondition-free validations in
+#   variables.tf require locations only once a caller opts into
+#   whitelist/blacklist.
+# - CKV2_AWS_32 (response headers policy): not in this module's v1
+#   interface at all — there is no response_headers_policy_id input on
+#   default_cache_behavior or cache_behaviors, so no distribution this
+#   module produces can attach one until that input ships.
+# - CKV2_AWS_47 (WAFv2 Log4j AMR on the attached Web ACL): inspects the
+#   *contents* of the Web ACL identified by web_acl_arn, a resource this
+#   module never creates and consumes only as an opaque ARN identifier
+#   (aws.modules.waf owns its rule groups). This module has no resource for
+#   Checkov to inspect and cannot satisfy this check from its own
+#   configuration under any input.
+skip-check:
+  - CKV_AWS_174 # Viewer certificate TLS >= 1.2 — false positive; Checkov cannot resolve the mutually exclusive dynamic viewer_certificate blocks. See comment above.
+  - CKV2_AWS_42 # Custom SSL certificate — same dynamic-block resolution limitation as CKV_AWS_174. See comment above.
+  - CKV_AWS_86 # Access logging — optional and advisory by design (logging input, access_logging_disabled check).
+  - CKV_AWS_310 # Origin failover — single-origin module by design; see docs/DESIGN.md, Deferred to v2.
+  - CKV_AWS_374 # Geo restriction — optional by design (geo_restriction defaults to "none").
+  - CKV2_AWS_32 # Response headers policy — not in the v1 interface.
+  - CKV2_AWS_47 # WAFv2 Log4j AMR — inspects the attached Web ACL's own rules, owned by aws.modules.waf, not this module.
