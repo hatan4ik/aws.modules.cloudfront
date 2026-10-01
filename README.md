@@ -12,7 +12,7 @@ What you get from `name` and `origin`, without setting anything else:
 - The `CachingOptimized` AWS managed cache policy by default for the default behavior and every additional `cache_behaviors` entry, so static content gets long TTLs and negotiated compression without picking a policy ID.
 - SPA-friendly error rewrites and additional path-based cache behaviors as plain data (`custom_error_responses`, `cache_behaviors`), with `"*"` reserved for `default_cache_behavior` and rejected as a `cache_behaviors` key.
 - Advisory `check` blocks that warn — never block — when access logging or a WAF Web ACL is not attached, since ADR 0004 wants a WAF at every entry layer.
-- Plan-time validation of `name`, `origin`, `price_class`, `aliases`, the alias/certificate mutual requirement, the ACM ARN's `us-east-1` region segment, `minimum_protocol_version`, the WAFv2 Web ACL ARN's CLOUDFRONT-scope shape, `geo_restriction`, and `custom_error_responses`.
+- Plan-time validation of `name`, `origin`, `price_class`, `aliases`, the alias/certificate mutual requirement, the ACM ARN's `us-east-1` region segment, `minimum_protocol_version`, the WAFv2 Web ACL ARN's CLOUDFRONT-scope shape and `us-east-1` region segment, `geo_restriction`, and `custom_error_responses`.
 - Only a `Name` tag is added (from `name`); caller tags are never overridden.
 
 ## Quick start
@@ -88,9 +88,9 @@ CloudFront resources are global; this module needs no provider alias and creates
 | Input | Must be created via `us-east-1` because | Validated here? |
 | --- | --- | --- |
 | `viewer_certificate_arn` | CloudFront reads custom-domain viewer certificates from ACM in `us-east-1` only, no matter where the distribution or its origin lives. | **Yes.** An ACM certificate ARN embeds its region as its fourth colon-separated segment, so a `validation` block checks that segment equals `us-east-1`. |
-| `web_acl_arn` | A CLOUDFRONT-scope WAFv2 Web ACL (`aws.modules.waf`) must be created through a `us-east-1` provider, regardless of the origin bucket's or distribution's region. | **No, and this is deliberate.** A CLOUDFRONT-scope Web ACL ARN's region segment is always the literal string `global`, not an actual region — a structural consequence of the scope being account-wide rather than tied to one region's WAFv2 endpoint. The validation confirms the ARN says `global/webacl/` (rejecting a `regional/webacl/` ARN, which genuinely cannot attach to CloudFront), but cannot confirm the ACL was actually requested through `us-east-1`, because that fact leaves no trace in the ARN. Only AWS's own API enforces it, at apply time. |
+| `web_acl_arn` | A CLOUDFRONT-scope WAFv2 Web ACL (`aws.modules.waf`) must be created through a `us-east-1` provider, regardless of the origin bucket's or distribution's region. | **Yes.** AWS issues a CLOUDFRONT-scope Web ACL ARN as `arn:aws:wafv2:us-east-1:<account>:global/webacl/<name>/<id>`: the region segment is the real region `us-east-1`, and `global` appears only in the resource segment. A `validation` block checks both, so a `regional/webacl/` ARN (which cannot attach to CloudFront) or a CLOUDFRONT-shaped ARN naming another region is rejected at plan time. `<name>` accepts letters, digits, hyphens, and underscores, exactly what `aws.modules.waf` allows. |
 
-See [docs/DESIGN.md](docs/DESIGN.md) for the full reasoning behind this asymmetry.
+v1.0.0 wrongly required the literal string `global` in the WAF ARN's *region* segment, a shape AWS never issues, so no real CLOUDFRONT-scope Web ACL could be attached; see [docs/DESIGN.md](docs/DESIGN.md) and [CHANGELOG.md](CHANGELOG.md).
 
 ## Architecture
 
@@ -136,7 +136,7 @@ Transport and certificates
 
 Perimeter
 
-- `web_acl_arn` is optional but advised: the `web_acl_not_attached` check warns on every plan and apply while it is unset. Its ARN shape is validated as CLOUDFRONT-scope; the `us-east-1` provider requirement behind it cannot be validated from the ARN alone (see above).
+- `web_acl_arn` is optional but advised: the `web_acl_not_attached` check warns on every plan and apply while it is unset. Its ARN is validated as CLOUDFRONT-scope (`global/webacl/`) in `us-east-1` (see above).
 - `geo_restriction` defaults to `none`; `whitelist` and `blacklist` both require a non-empty `locations` set of uppercase ISO 3166-1 alpha-2 codes.
 - Standard access logging is optional but advised: the `access_logging_disabled` check warns while `logging` is unset.
 
@@ -244,7 +244,7 @@ No modules.
 | <a name="input_price_class"></a> [price\_class](#input\_price\_class) | Edge locations that serve the distribution. PriceClass\_100 (the default) is the cheapest: US, Canada, and Europe only. Opt into PriceClass\_200 (adds Asia, Africa, Oceania) or PriceClass\_All explicitly. | `string` | `"PriceClass_100"` | no |
 | <a name="input_tags"></a> [tags](#input\_tags) | Tags applied to the distribution. The module adds a Name tag (from name) only when you do not set one, and never overrides caller tags. | `map(string)` | `{}` | no |
 | <a name="input_viewer_certificate_arn"></a> [viewer\_certificate\_arn](#input\_viewer\_certificate\_arn) | ACM certificate ARN presented to viewers for a custom domain. Required when aliases is non-empty and forbidden when it is empty (the default *.cloudfront.net certificate already covers that case). CloudFront only ever reads viewer certificates from us-east-1, regardless of the origin bucket's region or this module's own provider region, so the ARN's region segment is validated here; the certificate itself must actually have been requested through a us-east-1 provider (see aws.modules.acm's cloudfront example) since Terraform cannot inspect where an ARN's resource was created, only what the ARN string says. | `string` | `null` | no |
-| <a name="input_web_acl_arn"></a> [web\_acl\_arn](#input\_web\_acl\_arn) | ARN of a CLOUDFRONT-scope WAFv2 Web ACL (from aws.modules.waf) to associate with the distribution. Optional, but a check block advises setting it: ADR 0004 places a global WAF at every entry layer. A CLOUDFRONT-scope Web ACL's ARN carries the literal segment "global" where a REGIONAL-scope ARN would carry a region, so unlike viewer\_certificate\_arn there is no region string to check against us-east-1 here; only that the caller actually created the ACL through a us-east-1 provider proves the scope, and Terraform cannot inspect that. See docs/DESIGN.md. | `string` | `null` | no |
+| <a name="input_web_acl_arn"></a> [web\_acl\_arn](#input\_web\_acl\_arn) | ARN of a CLOUDFRONT-scope WAFv2 Web ACL (for example aws.modules.waf's web\_acl\_arn output with scope = "CLOUDFRONT") to associate with the distribution. Optional, but a check block advises setting it: ADR 0004 places a global WAF at every entry layer. AWS issues a CLOUDFRONT-scope Web ACL's ARN as arn:<partition>:wafv2:us-east-1:<account>:global/webacl/<name>/<id>: the region segment is the real region us-east-1 (the only region WAFv2 accepts CLOUDFRONT-scope ACLs from) and "global" appears only in the resource segment. Both are validated, so a REGIONAL-scope ARN (regional/webacl/...) or a CLOUDFRONT-shaped ARN naming any other region is rejected at plan time. <name> accepts letters, digits, hyphens, and underscores, the same characters aws.modules.waf and the WAFv2 API allow. See docs/DESIGN.md. | `string` | `null` | no |
 
 ## Outputs
 

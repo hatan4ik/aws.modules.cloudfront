@@ -9,11 +9,13 @@ and `aws.modules.waf`'s own `us-east-1` alias requirement), which this
 example only consumes as ARNs — it does not itself need a `us-east-1`
 provider, since CloudFront resources are global.
 
-`viewer_certificate_arn`'s region segment is validated at plan time (it must
-say `us-east-1`); `web_acl_arn`'s cannot be, in the same way, because a
-CLOUDFRONT-scope Web ACL ARN's region segment is always the literal string
-`global` rather than an actual region, whichever region requested it. See
-[docs/DESIGN.md](../../docs/DESIGN.md) for why.
+Both ARNs' region segments are validated at plan time: the certificate's must
+say `us-east-1`, and so must the Web ACL's. A real CLOUDFRONT-scope Web ACL
+ARN looks like
+`arn:aws:wafv2:us-east-1:<account>:global/webacl/<name>/<id>` (the region is
+`us-east-1`; `global` only marks the scope in the resource segment), which is
+exactly what `aws.modules.waf`'s `web_acl_arn` output returns for
+`scope = "CLOUDFRONT"`. See [docs/DESIGN.md](../../docs/DESIGN.md).
 
 Access logging is also turned on here, to a bucket separate from the origin
 bucket, satisfying both of the module's advisory `check` blocks
@@ -28,7 +30,7 @@ terraform plan \
   -var bucket_regional_domain_name=my-static-site-origin.s3.us-east-1.amazonaws.com \
   -var domain_name=app.example.com \
   -var viewer_certificate_arn=arn:aws:acm:us-east-1:123456789012:certificate/11111111-2222-3333-4444-555555555555 \
-  -var web_acl_arn=arn:aws:wafv2:global:123456789012:global/webacl/app-example-com/11111111-1111-1111-1111-111111111111 \
+  -var web_acl_arn=arn:aws:wafv2:us-east-1:123456789012:global/webacl/app-example-com/11111111-1111-1111-1111-111111111111 \
   -var access_log_bucket_domain_name=my-cloudfront-logs.s3.us-east-1.amazonaws.com
 ```
 
@@ -65,7 +67,7 @@ No resources.
 | <a name="input_name"></a> [name](#input\_name) | Human-readable identifier for the distribution. | `string` | `"static-site-custom-domain"` | no |
 | <a name="input_region"></a> [region](#input\_region) | AWS region Terraform's default provider talks to. CloudFront itself is global; the certificate and Web ACL below must still have been created through a separate us-east-1 provider elsewhere, which this example only consumes ARNs from. | `string` | `"us-east-1"` | no |
 | <a name="input_viewer_certificate_arn"></a> [viewer\_certificate\_arn](#input\_viewer\_certificate\_arn) | ACM certificate ARN for domain\_name, requested through a us-east-1 provider (see aws.modules.acm's cloudfront example). Its region segment is validated by the module; that it was actually requested via us-east-1 is not something an ARN string can prove and is the caller's responsibility. | `string` | n/a | yes |
-| <a name="input_web_acl_arn"></a> [web\_acl\_arn](#input\_web\_acl\_arn) | ARN of a CLOUDFRONT-scope WAFv2 Web ACL (aws.modules.waf, also created through a us-east-1 provider). Its ARN shape is validated; that it was actually requested via us-east-1 cannot be, since a CLOUDFRONT-scope ACL ARN's region segment is always the literal string "global". | `string` | n/a | yes |
+| <a name="input_web_acl_arn"></a> [web\_acl\_arn](#input\_web\_acl\_arn) | ARN of a CLOUDFRONT-scope WAFv2 Web ACL (aws.modules.waf's web\_acl\_arn output with scope = "CLOUDFRONT", created through us-east-1), such as arn:aws:wafv2:us-east-1:123456789012:global/webacl/app-example-com/<uuid>. The module validates both the us-east-1 region segment and the global/webacl/ resource segment. | `string` | n/a | yes |
 
 ## Outputs
 

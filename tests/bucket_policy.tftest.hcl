@@ -31,7 +31,7 @@ variables {
     bucket_name                 = "static-site-origin"
     bucket_regional_domain_name = "static-site-origin.s3.us-east-1.amazonaws.com"
   }
-  web_acl_arn = "arn:aws:wafv2:global:123456789012:global/webacl/static-site/11111111-1111-1111-1111-111111111111"
+  web_acl_arn = "arn:aws:wafv2:us-east-1:123456789012:global/webacl/static-site/11111111-1111-1111-1111-111111111111"
   logging = {
     bucket_domain_name = "static-site-logs.s3.amazonaws.com"
   }

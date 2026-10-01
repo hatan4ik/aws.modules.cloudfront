@@ -117,13 +117,13 @@ variable "minimum_protocol_version" {
 }
 
 variable "web_acl_arn" {
-  description = "ARN of a CLOUDFRONT-scope WAFv2 Web ACL (from aws.modules.waf) to associate with the distribution. Optional, but a check block advises setting it: ADR 0004 places a global WAF at every entry layer. A CLOUDFRONT-scope Web ACL's ARN carries the literal segment \"global\" where a REGIONAL-scope ARN would carry a region, so unlike viewer_certificate_arn there is no region string to check against us-east-1 here; only that the caller actually created the ACL through a us-east-1 provider proves the scope, and Terraform cannot inspect that. See docs/DESIGN.md."
+  description = "ARN of a CLOUDFRONT-scope WAFv2 Web ACL (for example aws.modules.waf's web_acl_arn output with scope = \"CLOUDFRONT\") to associate with the distribution. Optional, but a check block advises setting it: ADR 0004 places a global WAF at every entry layer. AWS issues a CLOUDFRONT-scope Web ACL's ARN as arn:<partition>:wafv2:us-east-1:<account>:global/webacl/<name>/<id>: the region segment is the real region us-east-1 (the only region WAFv2 accepts CLOUDFRONT-scope ACLs from) and \"global\" appears only in the resource segment. Both are validated, so a REGIONAL-scope ARN (regional/webacl/...) or a CLOUDFRONT-shaped ARN naming any other region is rejected at plan time. <name> accepts letters, digits, hyphens, and underscores, the same characters aws.modules.waf and the WAFv2 API allow. See docs/DESIGN.md."
   type        = string
   default     = null
 
   validation {
-    condition     = var.web_acl_arn == null ? true : can(regex("^arn:[a-z-]+:wafv2:global:[0-9]{12}:global/webacl/[a-zA-Z0-9-]{1,128}/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", var.web_acl_arn))
-    error_message = "web_acl_arn must be a CLOUDFRONT-scope WAFv2 Web ACL ARN (arn:<partition>:wafv2:global:<account>:global/webacl/<name>/<id>). A REGIONAL-scope ACL ARN (regional/webacl/...) cannot be attached to a CloudFront distribution."
+    condition     = var.web_acl_arn == null ? true : can(regex("^arn:[a-z-]+:wafv2:us-east-1:[0-9]{12}:global/webacl/[a-zA-Z0-9_-]{1,128}/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", var.web_acl_arn))
+    error_message = "web_acl_arn must be a CLOUDFRONT-scope WAFv2 Web ACL ARN as AWS issues it: arn:<partition>:wafv2:us-east-1:<account>:global/webacl/<name>/<id>, where <name> is 1-128 letters, digits, hyphens, or underscores. A REGIONAL-scope ACL ARN (regional/webacl/...) cannot be attached to a CloudFront distribution."
   }
 }
 

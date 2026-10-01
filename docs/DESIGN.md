@@ -68,15 +68,24 @@ that must have been created through a `us-east-1` provider regardless of that:
 | Input | Must be created via `us-east-1` because | Validated here? |
 | --- | --- | --- |
 | `viewer_certificate_arn` | CloudFront reads custom-domain viewer certificates from ACM in `us-east-1` only, no matter where the distribution or its origin lives. | **Yes.** An ACM certificate ARN embeds its region as its fourth colon-separated segment (`arn:aws:acm:us-east-1:...`), so the variable's own `validation` block checks that segment equals `us-east-1` with `can(regex(...))`. This is a real, load-bearing check: a certificate requested in the wrong region fails exactly this way in practice. |
-| `web_acl_arn` | A CLOUDFRONT-scope WAFv2 Web ACL must be created through a `us-east-1` provider (`aws.modules.waf`'s own `us-east-1` alias requirement), regardless of the origin bucket's or distribution's region. | **No, and this is deliberate, not an oversight.** A WAFv2 Web ACL ARN's shape is `arn:<partition>:wafv2:<region-or-global>:<account>:<scope>/webacl/<name>/<id>`. For a CLOUDFRONT-scope ACL that region-or-global segment is the literal string `global`, not `us-east-1` — a structural consequence of the CLOUDFRONT scope being inherently account-wide rather than tied to one region's WAFv2 endpoint. The validation here can and does confirm the ARN says `global/webacl/` (rejecting a `regional/webacl/` ARN, which really cannot be attached to a CloudFront distribution and *is* a genuine plan-time-catchable mistake), but it structurally cannot confirm the ACL was actually requested through a `us-east-1` provider, because that fact leaves no trace in the ARN. Only AWS's own API enforces it, at apply time, for real. |
+| `web_acl_arn` | A CLOUDFRONT-scope WAFv2 Web ACL must be created through a `us-east-1` provider (`aws.modules.waf`'s `region = "us-east-1"` requirement for `scope = "CLOUDFRONT"`), regardless of the origin bucket's or distribution's region. | **Yes.** AWS issues a CLOUDFRONT-scope Web ACL ARN as `arn:<partition>:wafv2:us-east-1:<account>:global/webacl/<name>/<id>` (the WAFv2 developer guide's own example is `arn:aws:wafv2:us-east-1:111122223333:global/webacl/ExampleWebACL/<uuid>`). The region segment carries the real region, `us-east-1`; the literal `global` appears only in the *resource* segment, as the scope marker. The variable's `validation` therefore checks both: the region segment equals `us-east-1`, and the resource segment says `global/webacl/` (rejecting a `regional/webacl/` ARN, which cannot be attached to a CloudFront distribution). |
 
-This asymmetry — one input's region constraint is provable from its ARN, the
-other's is not — is exactly what the brief for this module called out as the
-detail most worth getting right and most worth being honest about. Silently
-validating "as much of the WAF case as looks similar to the ACM case" would
-have produced a check that always passes and proves nothing; the README and
-this document say so explicitly instead of implying a guarantee that does not
-exist.
+**Correction (v2.0.0).** v1.0.0 of this document claimed the opposite: that a
+CLOUDFRONT-scope ARN carries the literal string `global` in its *region*
+segment, so its `us-east-1` origin "leaves no trace in the ARN" and could not
+be validated. That was factually wrong, and the validation built on it
+(`^arn:...:wafv2:global:...`) rejected every CLOUDFRONT-scope Web ACL ARN AWS
+actually issues — including `aws.modules.waf`'s real output — so the
+WAF-on-CloudFront composition ADR 0004 calls for was impossible through these
+two modules. Every test and example used a fabricated ARN of the same wrong
+shape, which is why it went unnoticed. Both inputs' `us-east-1` constraints are
+in fact provable from their ARNs, and both are now validated the same way.
+
+The Web ACL `<name>` segment accepts `[a-zA-Z0-9_-]{1,128}`: letters, digits,
+hyphens, and underscores, matching what `aws.modules.waf` and the WAFv2 API
+(`^[\w\-]+$`, 1-128 characters) allow, so an ACL legitimately named, say,
+`api_acl` composes. `aws.modules.alb`'s REGIONAL-scope validation uses the same
+character class.
 
 ## `required_bucket_policy_json` and `AWS:SourceArn`
 
