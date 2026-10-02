@@ -59,4 +59,22 @@ locals {
       }
     }
   }
+
+  # The key-side statement the caller must add to the origin bucket's KMS
+  # key policy when its objects are encrypted with SSE-KMS under a customer
+  # managed key. Same SourceArn scoping as the bucket statement. kms:Decrypt
+  # only: this distribution only reads (s3:GetObject). In a key policy,
+  # Resource "*" means the key the policy is attached to.
+  kms_key_policy_statement = {
+    Sid       = "AllowCloudFrontServicePrincipalSSEKMSDecrypt"
+    Effect    = "Allow"
+    Principal = { Service = "cloudfront.amazonaws.com" }
+    Action    = "kms:Decrypt"
+    Resource  = "*"
+    Condition = {
+      StringEquals = {
+        "AWS:SourceArn" = aws_cloudfront_distribution.this.arn
+      }
+    }
+  }
 }

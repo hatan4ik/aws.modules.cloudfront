@@ -81,6 +81,46 @@ Passing the distribution's ARN back into the same `module "origin_bucket"` call 
 
 Point a Route 53 alias record at the distribution with `domain_name` and the fixed `hosted_zone_id` output, through `aws.modules.route53`.
 
+## SSE-KMS origins: the key policy statement
+
+`aws.modules.s3` defaults to `sse_algorithm = "aws:kms"` and, with `kms_key_arn = null`, to the **AWS managed** `aws/s3` key. CloudFront's OAC must be able to call `kms:Decrypt` on the key that encrypted an object, which takes a statement in that **key's policy**, not only in the bucket policy. So:
+
+| Origin bucket encryption | What the caller must do |
+| --- | --- |
+| SSE-S3 (`AES256`) | Nothing beyond `required_bucket_policy_json`. |
+| SSE-KMS under a **customer managed** key | Attach `required_bucket_policy_json` to the bucket **and** add `required_kms_key_policy_json` to the key's policy. |
+| SSE-KMS under the **AWS managed `aws/s3`** key (`aws.modules.s3`'s default) | **Not usable with OAC.** An AWS managed key's policy cannot be edited, so CloudFront can never be granted `kms:Decrypt` on it. Use a customer managed key (`kms_key_arn`) or `sse_algorithm = "AES256"` for the origin bucket. |
+
+`required_kms_key_policy_json` grants `cloudfront.amazonaws.com` only `kms:Decrypt` (the distribution only reads), scoped by the same `AWS:SourceArn` condition as the bucket statement, so no other distribution can decrypt with the key:
+
+```hcl
+data "aws_iam_policy_document" "origin_key" {
+  # ...the key's existing statements (key administrators, the account root)...
+  source_policy_documents = [jsonencode({
+    Version   = "2012-10-17"
+    Statement = [jsondecode(module.distribution.required_kms_key_policy_json)]
+  })]
+}
+
+resource "aws_kms_key_policy" "origin" {
+  key_id = aws_kms_key.origin.id
+  policy = data.aws_iam_policy_document.origin_key.json
+}
+```
+
+**Forgetting it fails closed, silently.** The distribution deploys, the bucket policy looks right, and every object request returns `403 AccessDenied` from the origin: safe, but nothing at plan or apply time says why. To detect it: request a known object through the distribution after deploy and expect a 200 (the integration suite does exactly this); a 403 on an object that exists, with `required_bucket_policy_json` attached, points at the key policy. S3 server access logs or CloudTrail data events show the underlying `kms:Decrypt` denial for the `cloudfront.amazonaws.com` principal.
+
+## Quotas
+
+CloudFront's default quotas that this module's inputs can run into (both adjustable through Service Quotas; the module does not validate them because the effective limit is per account):
+
+| Quota | Default | Input |
+| --- | --- | --- |
+| Cache behaviors per distribution | 25 | `cache_behaviors` (the default behavior is separate) |
+| Alternate domain names (CNAMEs) per distribution | 100 | `aliases` |
+
+Exceeding either fails at apply time with a CloudFront `TooMany...` error, not at plan time.
+
 ## The CloudFront + ACM + WAF `us-east-1` constraint
 
 CloudFront resources are global; this module needs no provider alias and creates its distribution with whatever provider (and region) the caller configures. Two of its *inputs*, however, are validated identifiers for resources that must have been created through a `us-east-1` provider regardless of that:
@@ -100,14 +140,15 @@ root (one distribution, one origin, one OAC)
 │                  behavior, cache behaviors, tags.
 ├── locals.tf      Tag merge, partition fallback, the fixed CloudFront hosted
 │                  zone ID, the CachingOptimized default, cache-behavior
-│                  default resolution, the bucket policy statement.
+│                  default resolution, the bucket and KMS key policy statements.
 ├── main.tf        aws_cloudfront_origin_access_control.this,
 │                  aws_cloudfront_distribution.this (dynamic
 │                  ordered_cache_behavior, custom_error_response,
 │                  viewer_certificate, logging_config), resource
 │                  preconditions for the alias/certificate rule.
 ├── checks.tf      Advisory: access_logging_disabled, web_acl_not_attached.
-└── outputs.tf     Identity, the fixed hosted zone ID, required_bucket_policy_json.
+└── outputs.tf     Identity, the fixed hosted zone ID, required_bucket_policy_json,
+                   required_kms_key_policy_json.
 ```
 
 `cache_behaviors` is an ordered **list** of objects, each with its own `path_pattern`. CloudFront evaluates ordered cache behaviors in the order it receives them and uses the **first** one whose pattern matches, so the list order is the precedence order: list a narrower pattern (`/static/images/*`) before a broader one that also matches it (`/static/*`), or the narrower one never matches. (v1.x took a map keyed by `path_pattern`, which rendered in lexical key order regardless of intent; see [docs/UPGRADE-2.0.md](docs/UPGRADE-2.0.md).) `path_pattern` must be non-empty and unique, and `"*"` is rejected because it is reserved for `default_cache_behavior`, configured as a separate input entirely. Both share the same settings (`allowed_methods`, `cached_methods`, `cache_policy_id`, `compress`), so a path pattern's behavior can be promoted to the default behavior, or vice versa, by moving the object (minus `path_pattern`), not rewriting it. `cache_policy_id` left `null` in either resolves to the AWS managed `CachingOptimized` policy (`658327ea-f89d-4fab-a63d-7e88639e58f6`).
@@ -257,4 +298,5 @@ No modules.
 | <a name="output_hosted_zone_id"></a> [hosted\_zone\_id](#output\_hosted\_zone\_id) | CloudFront's fixed alias-target hosted zone ID (Z2FDTNDATAQYW2 in the standard aws partition), for a Route 53 alias record via aws.modules.route53. It identifies CloudFront as an alias target class, not a zone this distribution owns. |
 | <a name="output_origin_access_control_id"></a> [origin\_access\_control\_id](#output\_origin\_access\_control\_id) | ID of the Origin Access Control this distribution reads the S3 origin through. |
 | <a name="output_required_bucket_policy_json"></a> [required\_bucket\_policy\_json](#output\_required\_bucket\_policy\_json) | The exact IAM policy STATEMENT (not a full policy document) the origin bucket needs, as a JSON string: grants cloudfront.amazonaws.com s3:GetObject on the origin path, scoped by a Condition.StringEquals["AWS:SourceArn"] to this distribution's own ARN. Merge it (jsondecode it first) into a standalone aws\_s3\_bucket\_policy's statement list, or translate it into aws.modules.s3's own typed bucket\_policy\_statements input (its principals and conditions fields have a different shape than raw IAM JSON); this module cannot attach it itself because it does not own the bucket. A missing or wrong SourceArn here would let any CloudFront distribution in the account read the bucket, not just this one. |
+| <a name="output_required_kms_key_policy_json"></a> [required\_kms\_key\_policy\_json](#output\_required\_kms\_key\_policy\_json) | The KMS key-policy STATEMENT (not a full policy document) the origin bucket's encryption key needs when objects are encrypted with SSE-KMS (aws:kms or aws:kms:dsse) under a CUSTOMER MANAGED key, as a JSON string: grants cloudfront.amazonaws.com kms:Decrypt, scoped by Condition.StringEquals["AWS:SourceArn"] to this distribution's own ARN. Add it (jsondecode it first) to that key's policy. Not needed for SSE-S3 (AES256). It cannot be used with the AWS managed aws/s3 key, whose key policy cannot be edited: OAC cannot read objects encrypted under aws/s3, so use a customer managed key or SSE-S3 instead (aws.modules.s3 defaults to aws:kms with aws/s3 when kms\_key\_arn is null). Without this statement CloudFront fails closed: every object request returns 403 AccessDenied. |
 <!-- END_TF_DOCS -->

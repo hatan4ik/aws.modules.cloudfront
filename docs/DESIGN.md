@@ -135,6 +135,30 @@ later `plan` run in the same file would make a value the plan run expects to
 be unknown appear unexpectedly known (or vice versa), quietly changing what
 that run is actually testing.
 
+## `required_kms_key_policy_json` and SSE-KMS origins
+
+`aws.modules.s3`, the typical origin, defaults to SSE-KMS under the AWS
+managed `aws/s3` key. OAC reads an SSE-KMS object only if CloudFront may call
+`kms:Decrypt` on its key, which must be granted in the **key policy**. The
+module therefore renders a second statement, `required_kms_key_policy_json`,
+following the same pattern and the same `AWS:SourceArn` scoping as
+`required_bucket_policy_json`, for a caller to add to a **customer managed**
+key's policy. It grants only `kms:Decrypt`, since the distribution only reads;
+AWS's documented example also lists `kms:Encrypt` and `kms:GenerateDataKey*`,
+which only matter for OAC writes (`s3:PutObject`), which this module never
+grants. The AWS managed `aws/s3` key cannot be used at all: its key policy is
+AWS-owned and cannot be edited, so no statement can grant CloudFront
+`kms:Decrypt` on it. A missing statement fails closed (403 from the origin),
+which is safe but invisible at plan and apply time; the README documents how
+to detect it, and the integration suite exercises the read path end to end.
+
+## Quotas
+
+CloudFront's default per-distribution quotas are 25 cache behaviors and 100
+alternate domain names (aliases), both adjustable per account through Service
+Quotas. They are documented rather than validated, since a plan-time check
+against the default would wrongly reject an account with a raised quota.
+
 ## Interface
 
 - `name` — required; see above.
@@ -189,7 +213,8 @@ supplies their own managed or customer-managed policy ID.
 ## Outputs
 
 `distribution_id`, `distribution_arn`, `domain_name`, `hosted_zone_id`,
-`origin_access_control_id`, `required_bucket_policy_json`. `hosted_zone_id`
+`origin_access_control_id`, `required_bucket_policy_json`,
+`required_kms_key_policy_json`. `hosted_zone_id`
 is a fixed constant (`Z2FDTNDATAQYW2`), not a resource attribute lookup: it
 identifies "an alias target is a CloudFront distribution" to Route 53, the
 same value for every distribution in the standard `aws` partition (the only
