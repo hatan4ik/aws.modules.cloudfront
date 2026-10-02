@@ -43,13 +43,13 @@ variable "origin" {
 }
 
 variable "partition" {
-  description = "AWS partition of the origin bucket's account (aws, aws-cn, aws-us-gov, ...), used only to render the Resource ARN in required_bucket_policy_json. Null reads it through aws_partition; pass it to avoid the lookup."
+  description = "AWS partition of the origin bucket's account, used only to render the Resource ARN in required_bucket_policy_json. Only the standard \"aws\" partition is supported: CloudFront in the China Regions (aws-cn) supports neither Origin Access Control (this module's only origin access mechanism), ACM viewer certificates, nor AWS WAF, and AWS GovCloud (US) has no CloudFront, so a distribution this module builds cannot work in either. Any other value is rejected here, and a looked-up partition other than aws fails a precondition. Null reads it through aws_partition; pass \"aws\" to skip the lookup."
   type        = string
   default     = null
 
   validation {
-    condition     = var.partition == null ? true : can(regex("^aws(-[a-z]+)*$", var.partition))
-    error_message = "partition must be aws or an aws-<suffix> partition such as aws-cn or aws-us-gov."
+    condition     = var.partition == null ? true : var.partition == "aws"
+    error_message = "partition must be aws (or null to look it up). aws-cn and aws-us-gov are not supported: CloudFront there lacks Origin Access Control, ACM certificates, and WAF (aws-cn) or does not exist (aws-us-gov)."
   }
 }
 
@@ -105,25 +105,25 @@ variable "viewer_certificate_arn" {
 }
 
 variable "minimum_protocol_version" {
-  description = "Minimum TLS version CloudFront negotiates with viewers when a custom viewer certificate is used (aliases non-empty). Ignored when the distribution uses the default certificate, which CloudFront always serves at its own fixed minimum version."
+  description = "CloudFront security policy (minimum TLS version and ciphers) for viewers when a custom viewer certificate is used (aliases non-empty). Accepts the TLS 1.2+ policies TLSv1.2_2018, TLSv1.2_2019, TLSv1.2_2021 (the default), TLSv1.2_2025, and TLSv1.3_2025 (TLS 1.3 only); policies allowing deprecated TLS 1.0/1.1 are rejected. Ignored when the distribution uses the default certificate, which CloudFront always serves at its own fixed minimum version."
   type        = string
   default     = "TLSv1.2_2021"
   nullable    = false
 
   validation {
-    condition     = contains(["TLSv1", "TLSv1_2016", "TLSv1.1_2016", "TLSv1.2_2018", "TLSv1.2_2019", "TLSv1.2_2021"], var.minimum_protocol_version)
-    error_message = "minimum_protocol_version must be one of TLSv1, TLSv1_2016, TLSv1.1_2016, TLSv1.2_2018, TLSv1.2_2019, or TLSv1.2_2021."
+    condition     = contains(["TLSv1.2_2018", "TLSv1.2_2019", "TLSv1.2_2021", "TLSv1.2_2025", "TLSv1.3_2025"], var.minimum_protocol_version)
+    error_message = "minimum_protocol_version must be one of TLSv1.2_2018, TLSv1.2_2019, TLSv1.2_2021, TLSv1.2_2025, or TLSv1.3_2025. Policies that allow TLS 1.0 or 1.1 (TLSv1, TLSv1_2016, TLSv1.1_2016) are not accepted."
   }
 }
 
 variable "web_acl_arn" {
-  description = "ARN of a CLOUDFRONT-scope WAFv2 Web ACL (from aws.modules.waf) to associate with the distribution. Optional, but a check block advises setting it: ADR 0004 places a global WAF at every entry layer. A CLOUDFRONT-scope Web ACL's ARN carries the literal segment \"global\" where a REGIONAL-scope ARN would carry a region, so unlike viewer_certificate_arn there is no region string to check against us-east-1 here; only that the caller actually created the ACL through a us-east-1 provider proves the scope, and Terraform cannot inspect that. See docs/DESIGN.md."
+  description = "ARN of a CLOUDFRONT-scope WAFv2 Web ACL (for example aws.modules.waf's web_acl_arn output with scope = \"CLOUDFRONT\") to associate with the distribution. Optional, but a check block advises setting it: ADR 0004 places a global WAF at every entry layer. AWS issues a CLOUDFRONT-scope Web ACL's ARN as arn:<partition>:wafv2:us-east-1:<account>:global/webacl/<name>/<id>: the region segment is the real region us-east-1 (the only region WAFv2 accepts CLOUDFRONT-scope ACLs from) and \"global\" appears only in the resource segment. Both are validated, so a REGIONAL-scope ARN (regional/webacl/...) or a CLOUDFRONT-shaped ARN naming any other region is rejected at plan time. <name> accepts letters, digits, hyphens, and underscores, the same characters aws.modules.waf and the WAFv2 API allow. See docs/DESIGN.md."
   type        = string
   default     = null
 
   validation {
-    condition     = var.web_acl_arn == null ? true : can(regex("^arn:[a-z-]+:wafv2:global:[0-9]{12}:global/webacl/[a-zA-Z0-9-]{1,128}/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", var.web_acl_arn))
-    error_message = "web_acl_arn must be a CLOUDFRONT-scope WAFv2 Web ACL ARN (arn:<partition>:wafv2:global:<account>:global/webacl/<name>/<id>). A REGIONAL-scope ACL ARN (regional/webacl/...) cannot be attached to a CloudFront distribution."
+    condition     = var.web_acl_arn == null ? true : can(regex("^arn:[a-z-]+:wafv2:us-east-1:[0-9]{12}:global/webacl/[a-zA-Z0-9_-]{1,128}/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", var.web_acl_arn))
+    error_message = "web_acl_arn must be a CLOUDFRONT-scope WAFv2 Web ACL ARN as AWS issues it: arn:<partition>:wafv2:us-east-1:<account>:global/webacl/<name>/<id>, where <name> is 1-128 letters, digits, hyphens, or underscores. A REGIONAL-scope ACL ARN (regional/webacl/...) cannot be attached to a CloudFront distribution."
   }
 }
 
@@ -215,19 +215,30 @@ variable "default_cache_behavior" {
 }
 
 variable "cache_behaviors" {
-  description = "Additional ordered cache behaviors keyed by path_pattern, evaluated before default_cache_behavior in the order CloudFront receives them (map key order in this provider version). \"*\" is reserved for default_cache_behavior and rejected here. cache_policy_id null (the default) uses the AWS managed CachingOptimized policy."
-  type = map(object({
+  description = "Additional cache behaviors, evaluated before default_cache_behavior. CloudFront uses the FIRST behavior whose path_pattern matches a request, and this list's order is exactly the order CloudFront receives them in: list a narrower pattern (\"/static/images/*\") before a broader one that also matches it (\"/static/*\"), or the narrower one never matches. path_pattern must be non-empty and unique; \"*\" is reserved for default_cache_behavior and rejected here. cache_policy_id null (the default) uses the AWS managed CachingOptimized policy. CloudFront's default quota is 25 cache behaviors per distribution (adjustable through Service Quotas)."
+  type = list(object({
+    path_pattern    = string
     allowed_methods = optional(set(string), ["GET", "HEAD"])
     cached_methods  = optional(set(string), ["GET", "HEAD"])
     cache_policy_id = optional(string)
     compress        = optional(bool, true)
   }))
-  default  = {}
+  default  = []
   nullable = false
 
   validation {
-    condition     = !contains(keys(var.cache_behaviors), "*")
-    error_message = "cache_behaviors must not use \"*\" as a key: it is reserved for default_cache_behavior, configured separately."
+    condition     = alltrue([for behavior in var.cache_behaviors : behavior.path_pattern != "*"])
+    error_message = "cache_behaviors must not use \"*\" as a path_pattern: it is reserved for default_cache_behavior, configured separately."
+  }
+
+  validation {
+    condition     = alltrue([for behavior in var.cache_behaviors : length(behavior.path_pattern) > 0])
+    error_message = "Every cache_behaviors[*].path_pattern must be non-empty."
+  }
+
+  validation {
+    condition     = length(distinct([for behavior in var.cache_behaviors : behavior.path_pattern])) == length(var.cache_behaviors)
+    error_message = "cache_behaviors path_pattern values must be unique: a second behavior with the same pattern could never match."
   }
 }
 

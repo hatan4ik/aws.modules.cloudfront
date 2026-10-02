@@ -7,7 +7,7 @@ EXAMPLE_DIRS  := $(sort $(patsubst %/,%,$(dir $(wildcard examples/*/*.tf))))
 # The smoke integration suite's throwaway S3 bucket fixture. It is not a
 # deployable pattern (see tests/integration/README.md) but still gets fmt,
 # validate, lint, and docs like every other directory.
-FIXTURE_DIRS  := tests/integration/setup
+FIXTURE_DIRS  := tests/integration/setup tests/integration/probe
 ALL_DIRS      := $(ROOT_DIRS) $(EXAMPLE_DIRS) $(FIXTURE_DIRS)
 TFLINT_CONFIG := $(CURDIR)/.tflint.hcl
 TFDOCS_CONFIG := $(CURDIR)/.terraform-docs.yml

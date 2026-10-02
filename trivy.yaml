@@ -5,3 +5,4 @@
 scan:
   skip-dirs:
     - tests/integration/setup
+    - tests/integration/probe

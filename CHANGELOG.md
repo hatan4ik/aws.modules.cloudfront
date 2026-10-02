@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+Targets **v2.0.0**. Contains breaking interface changes; read [docs/UPGRADE-2.0.md](docs/UPGRADE-2.0.md) before upgrading.
+
+### Changed (BREAKING)
+
+- **`cache_behaviors` is now an ordered `list(object({ path_pattern = string, ... }))`, not a `map` keyed by `path_pattern`.** CloudFront uses the *first* ordered cache behavior whose pattern matches, and a `dynamic` block over a map iterates in lexical key order, so in v1.0.0 precedence was decided by string sort, not by the caller: `"/static/*"` always rendered before `"/static/images/*"` and the narrower pattern could never match. The list order is now exactly the order CloudFront evaluates. Move each map key into a `path_pattern` field and order entries most specific first. New validations: `path_pattern` must be non-empty and unique (`"*"` is still rejected). See [docs/UPGRADE-2.0.md](docs/UPGRADE-2.0.md#1-cache_behaviors-is-now-an-ordered-list-not-a-map).
+- `minimum_protocol_version` no longer accepts `TLSv1`, `TLSv1_2016`, or `TLSv1.1_2016`, which allow deprecated TLS 1.0/1.1. The default (`TLSv1.2_2021`) is unchanged.
+- `partition` accepts only `aws`, and a looked-up partition other than `aws` fails a resource precondition. v1.0.0 accepted `aws-cn` but always returned the standard partition's `hosted_zone_id` (`Z2FDTNDATAQYW2`; China's is `Z3RFFRIM2A3IF5`), and the module cannot work there anyway: CloudFront in the China Regions supports neither Origin Access Control, ACM viewer certificates, nor AWS WAF, and AWS GovCloud (US) has no CloudFront.
+
+### Fixed
+
+- **`web_acl_arn` rejected every real CLOUDFRONT-scope WAFv2 Web ACL ARN.** The validation required the literal string `global` in the ARN's *region* segment, but AWS issues `arn:aws:wafv2:us-east-1:<account>:global/webacl/<name>/<id>`: the region is `us-east-1` and `global` appears only in the resource segment. `aws.modules.waf`'s real output could therefore never be attached, making ADR 0004's WAF-on-CloudFront composition impossible. The validation now checks the `us-east-1` region segment and the `global/webacl/` resource segment. Not breaking: the previously required shape is one AWS never issues.
+- `web_acl_arn`'s Web ACL name segment now accepts underscores (`[a-zA-Z0-9_-]{1,128}`), matching what `aws.modules.waf` and the WAFv2 API allow, and the same character class as `aws.modules.alb`'s REGIONAL-scope validation.
+- Every test and example used a fabricated `arn:aws:wafv2:global:...` ARN that happened to satisfy the wrong regex; all now use real-shaped ARNs, and new tests prove a real ARN and an underscore name are accepted and the fabricated shape is rejected.
+- `docs/DESIGN.md` claimed a CLOUDFRONT-scope ARN carries `global` in its region segment and that its `us-east-1` origin could not be validated; corrected.
+
+### Added
+
+- `required_kms_key_policy_json` output: the KMS key-policy statement (`kms:Decrypt` for `cloudfront.amazonaws.com`, scoped by `AWS:SourceArn` to this distribution) an origin bucket's customer managed key needs when objects use SSE-KMS. The README documents that the AWS managed `aws/s3` key (`aws.modules.s3`'s default) cannot be used with OAC at all, since its key policy is not editable, and that a missing statement fails closed with 403.
+- `minimum_protocol_version` accepts the current CloudFront security policies `TLSv1.2_2025` and `TLSv1.3_2025`.
+- Contract tests proving list order is CloudFront precedence order (a narrower pattern listed first renders first; order is never re-sorted), for the TLS and partition validations, and for the KMS statement.
+- The integration smoke suite now proves the OAC read path end to end: through a new `tests/integration/probe` module it fetches a known fixture object through the real distribution, expecting `403` with no bucket policy and `200` with the exact body once `required_bucket_policy_json` is attached as the bucket's only grant.
+- README and `docs/DESIGN.md` document CloudFront's default 25 cache behaviors and 100 aliases per distribution quotas.
+
 ## [1.0.0] - 2026-09-27
 
 Initial release. Brand new module: no prior 0.x line, no live consumer, no `docs/UPGRADE-1.0.md`.

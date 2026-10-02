@@ -18,7 +18,7 @@ The module creates:
 - One `aws_cloudfront_origin_access_control` (OAC, not the legacy Origin
   Access Identity).
 - One `aws_cloudfront_distribution` with a default cache behavior, any number
-  of additional ordered cache behaviors keyed by path pattern, geographic
+  of additional ordered cache behaviors (a list, in precedence order), geographic
   restriction, custom error responses, optional access logging, and an
   optional WAF Web ACL association.
 - A rendered IAM policy **statement** (not a full document) that the caller
@@ -68,15 +68,24 @@ that must have been created through a `us-east-1` provider regardless of that:
 | Input | Must be created via `us-east-1` because | Validated here? |
 | --- | --- | --- |
 | `viewer_certificate_arn` | CloudFront reads custom-domain viewer certificates from ACM in `us-east-1` only, no matter where the distribution or its origin lives. | **Yes.** An ACM certificate ARN embeds its region as its fourth colon-separated segment (`arn:aws:acm:us-east-1:...`), so the variable's own `validation` block checks that segment equals `us-east-1` with `can(regex(...))`. This is a real, load-bearing check: a certificate requested in the wrong region fails exactly this way in practice. |
-| `web_acl_arn` | A CLOUDFRONT-scope WAFv2 Web ACL must be created through a `us-east-1` provider (`aws.modules.waf`'s own `us-east-1` alias requirement), regardless of the origin bucket's or distribution's region. | **No, and this is deliberate, not an oversight.** A WAFv2 Web ACL ARN's shape is `arn:<partition>:wafv2:<region-or-global>:<account>:<scope>/webacl/<name>/<id>`. For a CLOUDFRONT-scope ACL that region-or-global segment is the literal string `global`, not `us-east-1` — a structural consequence of the CLOUDFRONT scope being inherently account-wide rather than tied to one region's WAFv2 endpoint. The validation here can and does confirm the ARN says `global/webacl/` (rejecting a `regional/webacl/` ARN, which really cannot be attached to a CloudFront distribution and *is* a genuine plan-time-catchable mistake), but it structurally cannot confirm the ACL was actually requested through a `us-east-1` provider, because that fact leaves no trace in the ARN. Only AWS's own API enforces it, at apply time, for real. |
+| `web_acl_arn` | A CLOUDFRONT-scope WAFv2 Web ACL must be created through a `us-east-1` provider (`aws.modules.waf`'s `region = "us-east-1"` requirement for `scope = "CLOUDFRONT"`), regardless of the origin bucket's or distribution's region. | **Yes.** AWS issues a CLOUDFRONT-scope Web ACL ARN as `arn:<partition>:wafv2:us-east-1:<account>:global/webacl/<name>/<id>` (the WAFv2 developer guide's own example is `arn:aws:wafv2:us-east-1:111122223333:global/webacl/ExampleWebACL/<uuid>`). The region segment carries the real region, `us-east-1`; the literal `global` appears only in the *resource* segment, as the scope marker. The variable's `validation` therefore checks both: the region segment equals `us-east-1`, and the resource segment says `global/webacl/` (rejecting a `regional/webacl/` ARN, which cannot be attached to a CloudFront distribution). |
 
-This asymmetry — one input's region constraint is provable from its ARN, the
-other's is not — is exactly what the brief for this module called out as the
-detail most worth getting right and most worth being honest about. Silently
-validating "as much of the WAF case as looks similar to the ACM case" would
-have produced a check that always passes and proves nothing; the README and
-this document say so explicitly instead of implying a guarantee that does not
-exist.
+**Correction (v2.0.0).** v1.0.0 of this document claimed the opposite: that a
+CLOUDFRONT-scope ARN carries the literal string `global` in its *region*
+segment, so its `us-east-1` origin "leaves no trace in the ARN" and could not
+be validated. That was factually wrong, and the validation built on it
+(`^arn:...:wafv2:global:...`) rejected every CLOUDFRONT-scope Web ACL ARN AWS
+actually issues — including `aws.modules.waf`'s real output — so the
+WAF-on-CloudFront composition ADR 0004 calls for was impossible through these
+two modules. Every test and example used a fabricated ARN of the same wrong
+shape, which is why it went unnoticed. Both inputs' `us-east-1` constraints are
+in fact provable from their ARNs, and both are now validated the same way.
+
+The Web ACL `<name>` segment accepts `[a-zA-Z0-9_-]{1,128}`: letters, digits,
+hyphens, and underscores, matching what `aws.modules.waf` and the WAFv2 API
+(`^[\w\-]+$`, 1-128 characters) allow, so an ACL legitimately named, say,
+`api_acl` composes. `aws.modules.alb`'s REGIONAL-scope validation uses the same
+character class.
 
 ## `required_bucket_policy_json` and `AWS:SourceArn`
 
@@ -126,6 +135,30 @@ later `plan` run in the same file would make a value the plan run expects to
 be unknown appear unexpectedly known (or vice versa), quietly changing what
 that run is actually testing.
 
+## `required_kms_key_policy_json` and SSE-KMS origins
+
+`aws.modules.s3`, the typical origin, defaults to SSE-KMS under the AWS
+managed `aws/s3` key. OAC reads an SSE-KMS object only if CloudFront may call
+`kms:Decrypt` on its key, which must be granted in the **key policy**. The
+module therefore renders a second statement, `required_kms_key_policy_json`,
+following the same pattern and the same `AWS:SourceArn` scoping as
+`required_bucket_policy_json`, for a caller to add to a **customer managed**
+key's policy. It grants only `kms:Decrypt`, since the distribution only reads;
+AWS's documented example also lists `kms:Encrypt` and `kms:GenerateDataKey*`,
+which only matter for OAC writes (`s3:PutObject`), which this module never
+grants. The AWS managed `aws/s3` key cannot be used at all: its key policy is
+AWS-owned and cannot be edited, so no statement can grant CloudFront
+`kms:Decrypt` on it. A missing statement fails closed (403 from the origin),
+which is safe but invisible at plan and apply time; the README documents how
+to detect it, and the integration suite exercises the read path end to end.
+
+## Quotas
+
+CloudFront's default per-distribution quotas are 25 cache behaviors and 100
+alternate domain names (aliases), both adjustable per account through Service
+Quotas. They are documented rather than validated, since a plan-time check
+against the default would wrongly reject an account with a raised quota.
+
 ## Interface
 
 - `name` — required; see above.
@@ -136,20 +169,40 @@ that run is actually testing.
 - `partition` — optional; falls back to `data.aws_partition` only to render
   `required_bucket_policy_json`'s `Resource` ARN. The one documented
   exception to "no data sources," following `aws.modules.ksm`'s precedent for
-  the same reasoning.
+  the same reasoning. Only `aws` is accepted (a validation on the input and a
+  resource precondition on the looked-up value), since v2.0.0. v1.x accepted
+  any partition while always returning the standard partition's
+  `hosted_zone_id`, which is wrong in China (CloudFront there uses
+  `Z3RFFRIM2A3IF5`). Making the ID partition-aware would not have made the
+  module work there: CloudFront in the China Regions supports neither Origin
+  Access Control (this module's only origin access mechanism) nor ACM viewer
+  certificates nor AWS WAF, and AWS GovCloud (US) has no CloudFront. So the
+  honest fix is to reject the unsupported partitions rather than produce a
+  correct-looking output for a configuration that cannot apply.
 - `price_class`, `default_root_object`, `aliases`, `viewer_certificate_arn`,
   `minimum_protocol_version`, `web_acl_arn`, `geo_restriction`, `logging`,
   `custom_error_responses`, `default_cache_behavior`, `cache_behaviors`,
   `tags` — see the README's generated reference for full descriptions,
   defaults, and validations.
 
-`cache_behaviors` is a map keyed by `path_pattern`. `"*"` is rejected as a key
-(a variable validation) because it is reserved for `default_cache_behavior`,
-configured as a separate input entirely — CloudFront's own model already
-treats the default behavior specially (it is the fallback with no
-`path_pattern` of its own), and letting a caller spell that out as a
-`cache_behaviors["*"]` entry would create two different-looking ways to
-configure the same thing with different validation paths.
+`cache_behaviors` is an ordered `list(object({ path_pattern, ... }))`, not a
+map. CloudFront evaluates ordered cache behaviors in the order it receives
+them and uses the **first** whose `path_pattern` matches; the list order is
+therefore the precedence order, and the `dynamic "ordered_cache_behavior"`
+block iterates the list unchanged. v1.x keyed the input by `path_pattern` in a
+map, and a `dynamic` block over a map iterates in lexical key order, so
+`"/static/*"` always rendered before `"/static/images/*"` and the narrower
+pattern could never match — precedence decided by string sort, not by the
+caller. The list makes intent explicit at the cost of a breaking interface
+change (v2.0.0; see [UPGRADE-2.0.md](UPGRADE-2.0.md)). Because a list, unlike
+map keys, can repeat a value, `path_pattern` uniqueness and non-emptiness are
+now variable validations. `"*"` is rejected as a `path_pattern` because it is
+reserved for `default_cache_behavior`, configured as a separate input
+entirely — CloudFront's own model already treats the default behavior
+specially (it is the fallback with no `path_pattern` of its own), and letting
+a caller spell it out as a `cache_behaviors` entry would create two
+different-looking ways to configure the same thing with different validation
+paths.
 
 `cache_policy_id` in both `default_cache_behavior` and every `cache_behaviors`
 entry defaults (when left `null`) to the AWS managed **CachingOptimized**
@@ -160,11 +213,12 @@ supplies their own managed or customer-managed policy ID.
 ## Outputs
 
 `distribution_id`, `distribution_arn`, `domain_name`, `hosted_zone_id`,
-`origin_access_control_id`, `required_bucket_policy_json`. `hosted_zone_id`
+`origin_access_control_id`, `required_bucket_policy_json`,
+`required_kms_key_policy_json`. `hosted_zone_id`
 is a fixed constant (`Z2FDTNDATAQYW2`), not a resource attribute lookup: it
 identifies "an alias target is a CloudFront distribution" to Route 53, the
-same value for every distribution in the standard `aws` partition, documented
-by AWS rather than something this module could look up per-distribution. It
+same value for every distribution in the standard `aws` partition (the only
+partition this module supports; see `partition` above), documented by AWS rather than something this module could look up per-distribution. It
 is deliberately a `local`, not `aws_cloudfront_distribution.this.hosted_zone_id`,
 so that it stays knowable at plan time instead of turning every output into an
 apply-only assertion in `tests/`.
@@ -190,10 +244,10 @@ back into unilaterally.
   rendered bucket-policy statement. `main.tf` holds the resources,
   `locals.tf` the pure rendering logic, `checks.tf` the advisory posture.
 - **Open/closed.** New cache behaviors, aliases, geo-restriction entries, and
-  custom error responses arrive as data (map/set/list entries); no branch of
+  custom error responses arrive as data (list/set entries); no branch of
   the module needs editing to add one.
 - **Liskov substitution.** Every `cache_behaviors` entry and
-  `default_cache_behavior` share exactly the same object shape and default
+  `default_cache_behavior` share exactly the same settings and default
   resolution (`allowed_methods`, `cached_methods`, `cache_policy_id`,
   `compress`), so a path pattern's behavior can be promoted to the default
   behavior (or vice versa) by moving the object, not rewriting it.
@@ -255,5 +309,7 @@ root (one distribution, one origin, one OAC)
 
 ## Migration
 
-Not applicable: this is a new module with no prior release. There is no
-`docs/UPGRADE-1.0.md`.
+v1.0.0 was a new module with no prior release (no `docs/UPGRADE-1.0.md`).
+v2.0.0's breaking changes (`cache_behaviors` map to ordered list, removed
+TLS 1.0/1.1 security policies, `aws`-only `partition`) are covered step by
+step in [UPGRADE-2.0.md](UPGRADE-2.0.md).

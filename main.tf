@@ -43,11 +43,13 @@ resource "aws_cloudfront_distribution" "this" {
     compress               = local.default_cache_behavior.compress
   }
 
+  # Iterates a list, so behaviors render in the caller's declared order,
+  # which is the order CloudFront evaluates them in (first match wins).
   dynamic "ordered_cache_behavior" {
     for_each = local.cache_behaviors
 
     content {
-      path_pattern           = ordered_cache_behavior.key
+      path_pattern           = ordered_cache_behavior.value.path_pattern
       target_origin_id       = var.origin.bucket_name
       viewer_protocol_policy = "redirect-to-https"
       allowed_methods        = sort(tolist(ordered_cache_behavior.value.allowed_methods))
@@ -112,6 +114,11 @@ resource "aws_cloudfront_distribution" "this" {
   tags = local.tags
 
   lifecycle {
+    precondition {
+      condition     = local.partition == "aws"
+      error_message = "This module supports only the standard aws partition. CloudFront in aws-cn supports neither Origin Access Control, ACM viewer certificates, nor WAF, and aws-us-gov has no CloudFront; hosted_zone_id would also be wrong outside aws."
+    }
+
     precondition {
       condition     = local.has_aliases ? var.viewer_certificate_arn != null : true
       error_message = "viewer_certificate_arn is required when aliases is non-empty: CloudFront cannot serve a custom domain with only the default *.cloudfront.net certificate."

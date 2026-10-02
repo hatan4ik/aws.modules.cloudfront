@@ -1,4 +1,10 @@
-mock_provider "aws" {}
+# The module supports only the standard aws partition (see variables.tf's
+# partition), so the mocked partition lookup must return it.
+mock_provider "aws" {
+  mock_data "aws_partition" {
+    defaults = { partition = "aws" }
+  }
+}
 
 variables {
   name = "static-site"
@@ -6,7 +12,7 @@ variables {
     bucket_name                 = "static-site-origin"
     bucket_regional_domain_name = "static-site-origin.s3.us-east-1.amazonaws.com"
   }
-  web_acl_arn = "arn:aws:wafv2:global:123456789012:global/webacl/static-site/11111111-1111-1111-1111-111111111111"
+  web_acl_arn = "arn:aws:wafv2:us-east-1:123456789012:global/webacl/static-site/11111111-1111-1111-1111-111111111111"
   logging = {
     bucket_domain_name = "static-site-logs.s3.amazonaws.com"
   }

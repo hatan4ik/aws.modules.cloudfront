@@ -31,7 +31,7 @@ variable "viewer_certificate_arn" {
 }
 
 variable "web_acl_arn" {
-  description = "ARN of a CLOUDFRONT-scope WAFv2 Web ACL (aws.modules.waf, also created through a us-east-1 provider). Its ARN shape is validated; that it was actually requested via us-east-1 cannot be, since a CLOUDFRONT-scope ACL ARN's region segment is always the literal string \"global\"."
+  description = "ARN of a CLOUDFRONT-scope WAFv2 Web ACL (aws.modules.waf's web_acl_arn output with scope = \"CLOUDFRONT\", created through us-east-1), such as arn:aws:wafv2:us-east-1:123456789012:global/webacl/app-example-com/<uuid>. The module validates both the us-east-1 region segment and the global/webacl/ resource segment."
   type        = string
 }
 

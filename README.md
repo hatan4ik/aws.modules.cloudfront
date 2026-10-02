@@ -10,9 +10,9 @@ What you get from `name` and `origin`, without setting anything else:
 - Secure defaults. `TLSv1.2_2021` minimum protocol version, HTTPS-only viewer traffic (`redirect-to-https`), IPv6 enabled, `PriceClass_100` (the cheapest, US/Canada/Europe edge locations; wider distribution is an explicit opt-in).
 - One CloudFront default certificate, or one caller-supplied ACM certificate — never both, never neither. `aliases` empty uses `*.cloudfront.net`; `aliases` non-empty requires `viewer_certificate_arn`, validated to be an ACM ARN in `us-east-1`, the only region CloudFront ever reads viewer certificates from.
 - The `CachingOptimized` AWS managed cache policy by default for the default behavior and every additional `cache_behaviors` entry, so static content gets long TTLs and negotiated compression without picking a policy ID.
-- SPA-friendly error rewrites and additional path-based cache behaviors as plain data (`custom_error_responses`, `cache_behaviors`), with `"*"` reserved for `default_cache_behavior` and rejected as a `cache_behaviors` key.
+- SPA-friendly error rewrites and additional path-based cache behaviors as plain data (`custom_error_responses`, `cache_behaviors`), with `"*"` reserved for `default_cache_behavior` and rejected as a `cache_behaviors` `path_pattern`. `cache_behaviors` is an ordered list: its order is CloudFront's match precedence (first match wins).
 - Advisory `check` blocks that warn — never block — when access logging or a WAF Web ACL is not attached, since ADR 0004 wants a WAF at every entry layer.
-- Plan-time validation of `name`, `origin`, `price_class`, `aliases`, the alias/certificate mutual requirement, the ACM ARN's `us-east-1` region segment, `minimum_protocol_version`, the WAFv2 Web ACL ARN's CLOUDFRONT-scope shape, `geo_restriction`, and `custom_error_responses`.
+- Plan-time validation of `name`, `origin`, `price_class`, `aliases`, the alias/certificate mutual requirement, the ACM ARN's `us-east-1` region segment, `minimum_protocol_version`, the WAFv2 Web ACL ARN's CLOUDFRONT-scope shape and `us-east-1` region segment, `geo_restriction`, and `custom_error_responses`.
 - Only a `Name` tag is added (from `name`); caller tags are never overridden.
 
 ## Quick start
@@ -81,6 +81,46 @@ Passing the distribution's ARN back into the same `module "origin_bucket"` call 
 
 Point a Route 53 alias record at the distribution with `domain_name` and the fixed `hosted_zone_id` output, through `aws.modules.route53`.
 
+## SSE-KMS origins: the key policy statement
+
+`aws.modules.s3` defaults to `sse_algorithm = "aws:kms"` and, with `kms_key_arn = null`, to the **AWS managed** `aws/s3` key. CloudFront's OAC must be able to call `kms:Decrypt` on the key that encrypted an object, which takes a statement in that **key's policy**, not only in the bucket policy. So:
+
+| Origin bucket encryption | What the caller must do |
+| --- | --- |
+| SSE-S3 (`AES256`) | Nothing beyond `required_bucket_policy_json`. |
+| SSE-KMS under a **customer managed** key | Attach `required_bucket_policy_json` to the bucket **and** add `required_kms_key_policy_json` to the key's policy. |
+| SSE-KMS under the **AWS managed `aws/s3`** key (`aws.modules.s3`'s default) | **Not usable with OAC.** An AWS managed key's policy cannot be edited, so CloudFront can never be granted `kms:Decrypt` on it. Use a customer managed key (`kms_key_arn`) or `sse_algorithm = "AES256"` for the origin bucket. |
+
+`required_kms_key_policy_json` grants `cloudfront.amazonaws.com` only `kms:Decrypt` (the distribution only reads), scoped by the same `AWS:SourceArn` condition as the bucket statement, so no other distribution can decrypt with the key:
+
+```hcl
+data "aws_iam_policy_document" "origin_key" {
+  # ...the key's existing statements (key administrators, the account root)...
+  source_policy_documents = [jsonencode({
+    Version   = "2012-10-17"
+    Statement = [jsondecode(module.distribution.required_kms_key_policy_json)]
+  })]
+}
+
+resource "aws_kms_key_policy" "origin" {
+  key_id = aws_kms_key.origin.id
+  policy = data.aws_iam_policy_document.origin_key.json
+}
+```
+
+**Forgetting it fails closed, silently.** The distribution deploys, the bucket policy looks right, and every object request returns `403 AccessDenied` from the origin: safe, but nothing at plan or apply time says why. To detect it: request a known object through the distribution after deploy and expect a 200 (the integration suite does exactly this); a 403 on an object that exists, with `required_bucket_policy_json` attached, points at the key policy. S3 server access logs or CloudTrail data events show the underlying `kms:Decrypt` denial for the `cloudfront.amazonaws.com` principal.
+
+## Quotas
+
+CloudFront's default quotas that this module's inputs can run into (both adjustable through Service Quotas; the module does not validate them because the effective limit is per account):
+
+| Quota | Default | Input |
+| --- | --- | --- |
+| Cache behaviors per distribution | 25 | `cache_behaviors` (the default behavior is separate) |
+| Alternate domain names (CNAMEs) per distribution | 100 | `aliases` |
+
+Exceeding either fails at apply time with a CloudFront `TooMany...` error, not at plan time.
+
 ## The CloudFront + ACM + WAF `us-east-1` constraint
 
 CloudFront resources are global; this module needs no provider alias and creates its distribution with whatever provider (and region) the caller configures. Two of its *inputs*, however, are validated identifiers for resources that must have been created through a `us-east-1` provider regardless of that:
@@ -88,9 +128,9 @@ CloudFront resources are global; this module needs no provider alias and creates
 | Input | Must be created via `us-east-1` because | Validated here? |
 | --- | --- | --- |
 | `viewer_certificate_arn` | CloudFront reads custom-domain viewer certificates from ACM in `us-east-1` only, no matter where the distribution or its origin lives. | **Yes.** An ACM certificate ARN embeds its region as its fourth colon-separated segment, so a `validation` block checks that segment equals `us-east-1`. |
-| `web_acl_arn` | A CLOUDFRONT-scope WAFv2 Web ACL (`aws.modules.waf`) must be created through a `us-east-1` provider, regardless of the origin bucket's or distribution's region. | **No, and this is deliberate.** A CLOUDFRONT-scope Web ACL ARN's region segment is always the literal string `global`, not an actual region — a structural consequence of the scope being account-wide rather than tied to one region's WAFv2 endpoint. The validation confirms the ARN says `global/webacl/` (rejecting a `regional/webacl/` ARN, which genuinely cannot attach to CloudFront), but cannot confirm the ACL was actually requested through `us-east-1`, because that fact leaves no trace in the ARN. Only AWS's own API enforces it, at apply time. |
+| `web_acl_arn` | A CLOUDFRONT-scope WAFv2 Web ACL (`aws.modules.waf`) must be created through a `us-east-1` provider, regardless of the origin bucket's or distribution's region. | **Yes.** AWS issues a CLOUDFRONT-scope Web ACL ARN as `arn:aws:wafv2:us-east-1:<account>:global/webacl/<name>/<id>`: the region segment is the real region `us-east-1`, and `global` appears only in the resource segment. A `validation` block checks both, so a `regional/webacl/` ARN (which cannot attach to CloudFront) or a CLOUDFRONT-shaped ARN naming another region is rejected at plan time. `<name>` accepts letters, digits, hyphens, and underscores, exactly what `aws.modules.waf` allows. |
 
-See [docs/DESIGN.md](docs/DESIGN.md) for the full reasoning behind this asymmetry.
+v1.0.0 wrongly required the literal string `global` in the WAF ARN's *region* segment, a shape AWS never issues, so no real CLOUDFRONT-scope Web ACL could be attached; see [docs/DESIGN.md](docs/DESIGN.md) and [CHANGELOG.md](CHANGELOG.md).
 
 ## Architecture
 
@@ -100,17 +140,18 @@ root (one distribution, one origin, one OAC)
 │                  behavior, cache behaviors, tags.
 ├── locals.tf      Tag merge, partition fallback, the fixed CloudFront hosted
 │                  zone ID, the CachingOptimized default, cache-behavior
-│                  default resolution, the bucket policy statement.
+│                  default resolution, the bucket and KMS key policy statements.
 ├── main.tf        aws_cloudfront_origin_access_control.this,
 │                  aws_cloudfront_distribution.this (dynamic
 │                  ordered_cache_behavior, custom_error_response,
 │                  viewer_certificate, logging_config), resource
 │                  preconditions for the alias/certificate rule.
 ├── checks.tf      Advisory: access_logging_disabled, web_acl_not_attached.
-└── outputs.tf     Identity, the fixed hosted zone ID, required_bucket_policy_json.
+└── outputs.tf     Identity, the fixed hosted zone ID, required_bucket_policy_json,
+                   required_kms_key_policy_json.
 ```
 
-`cache_behaviors` is a map keyed by `path_pattern`; `"*"` is rejected as a key because it is reserved for `default_cache_behavior`, configured as a separate input entirely. Both share the same object shape (`allowed_methods`, `cached_methods`, `cache_policy_id`, `compress`), so a path pattern's behavior can be promoted to the default behavior, or vice versa, by moving the object, not rewriting it. `cache_policy_id` left `null` in either resolves to the AWS managed `CachingOptimized` policy (`658327ea-f89d-4fab-a63d-7e88639e58f6`).
+`cache_behaviors` is an ordered **list** of objects, each with its own `path_pattern`. CloudFront evaluates ordered cache behaviors in the order it receives them and uses the **first** one whose pattern matches, so the list order is the precedence order: list a narrower pattern (`/static/images/*`) before a broader one that also matches it (`/static/*`), or the narrower one never matches. (v1.x took a map keyed by `path_pattern`, which rendered in lexical key order regardless of intent; see [docs/UPGRADE-2.0.md](docs/UPGRADE-2.0.md).) `path_pattern` must be non-empty and unique, and `"*"` is rejected because it is reserved for `default_cache_behavior`, configured as a separate input entirely. Both share the same settings (`allowed_methods`, `cached_methods`, `cache_policy_id`, `compress`), so a path pattern's behavior can be promoted to the default behavior, or vice versa, by moving the object (minus `path_pattern`), not rewriting it. `cache_policy_id` left `null` in either resolves to the AWS managed `CachingOptimized` policy (`658327ea-f89d-4fab-a63d-7e88639e58f6`).
 
 ## Usage patterns
 
@@ -136,7 +177,7 @@ Transport and certificates
 
 Perimeter
 
-- `web_acl_arn` is optional but advised: the `web_acl_not_attached` check warns on every plan and apply while it is unset. Its ARN shape is validated as CLOUDFRONT-scope; the `us-east-1` provider requirement behind it cannot be validated from the ARN alone (see above).
+- `web_acl_arn` is optional but advised: the `web_acl_not_attached` check warns on every plan and apply while it is unset. Its ARN is validated as CLOUDFRONT-scope (`global/webacl/`) in `us-east-1` (see above).
 - `geo_restriction` defaults to `none`; `whitelist` and `blacklist` both require a non-empty `locations` set of uppercase ISO 3166-1 alpha-2 codes.
 - Standard access logging is optional but advised: the `access_logging_disabled` check warns while `logging` is unset.
 
@@ -149,7 +190,7 @@ Not created here
 
 Two layers, deliberately separate:
 
-- **Contract tests** (`tests/`, run by `make test` and by CI) use `mock_provider` with `command = plan`, except `tests/bucket_policy.tftest.hcl`, which needs `command = apply` because `required_bucket_policy_json` is rendered from the distribution's ARN, unknown at plan time for a fresh create. 48 tests cover secure defaults, every validation and precondition (through `expect_failures`), the default vs. custom-domain viewer certificate paths, geo restriction, custom error responses, cache behavior defaults and overrides, both advisory checks, and the `AWS:SourceArn` bucket-policy statement.
+- **Contract tests** (`tests/`, run by `make test` and by CI) use `mock_provider` with `command = plan`, except `tests/bucket_policy.tftest.hcl`, which needs `command = apply` because `required_bucket_policy_json` is rendered from the distribution's ARN, unknown at plan time for a fresh create. 66 tests cover secure defaults, every validation and precondition (through `expect_failures`), real-shaped CLOUDFRONT-scope WAF ARNs, the default vs. custom-domain viewer certificate paths, geo restriction, custom error responses, cache behavior defaults, overrides, and list-order precedence, both advisory checks, and the `AWS:SourceArn` bucket-policy and KMS key-policy statements. The integration suite additionally fetches an object through the real distribution with and without the bucket policy.
 - **Integration suite** (`tests/integration/`, run by `make integration-smoke` or the dispatch-only `integration` workflow) applies the module for real in **your** account: a disposable, private S3 bucket fixture (created plainly, not through `aws.modules.s3`, to keep the fixture minimal — this module's own tests must not depend on another module's interface), a minimal distribution against it, real-API assertions including the `AWS:SourceArn` condition again, then teardown. CloudFront distributions are slow both to create and to delete in real AWS (commonly 15-25 minutes each way, since `aws_cloudfront_distribution` waits for the `Deployed` state by default) — see [tests/integration/README.md](tests/integration/README.md) for why that is expected, not a hang.
 
 ## Design principles
@@ -165,9 +206,10 @@ The full rationale, including the ADR 0004 scope boundary and what was deliberat
 ## Compatibility and scope
 
 - Terraform `>= 1.7.0, < 2.0.0`. AWS provider `>= 6.35.0, < 7.0.0`.
+- Standard `aws` partition only. `partition` rejects `aws-cn` and `aws-us-gov`, and a looked-up partition other than `aws` fails a precondition: CloudFront in the China Regions supports neither Origin Access Control, ACM viewer certificates, nor AWS WAF, and AWS GovCloud (US) has no CloudFront.
 - One CloudFront distribution, one private S3 origin, per module call. No provider alias is required by this module itself; `viewer_certificate_arn` and `web_acl_arn` are only valid when the caller created those specific resources through a `us-east-1` provider elsewhere.
 - Static content delivery only, per ADR 0004. A second, ALB-backed origin type was considered and rejected for v1 — see [Deferred to v2 in docs/DESIGN.md](docs/DESIGN.md#deferred-to-v2).
-- Nothing in the v1 interface is scheduled to change. Additions arrive as optional inputs and outputs. This is a brand-new module: there is no `docs/UPGRADE-1.0.md` and no prior release to migrate from.
+- v2.0.0 changes the interface incompatibly (`cache_behaviors` is an ordered list, TLS 1.0/1.1 policies and non-`aws` partitions are rejected); see [docs/UPGRADE-2.0.md](docs/UPGRADE-2.0.md). Further additions arrive as optional inputs and outputs.
 
 ## Versioning and releases
 
@@ -231,20 +273,20 @@ No modules.
 | Name | Description | Type | Default | Required |
 |------|-------------|------|---------|:--------:|
 | <a name="input_aliases"></a> [aliases](#input\_aliases) | Custom domain names (CNAMEs) the distribution answers to, in addition to its own *.cloudfront.net domain. Empty by default, which uses the CloudFront default certificate; a non-empty set requires viewer\_certificate\_arn. | `set(string)` | `[]` | no |
-| <a name="input_cache_behaviors"></a> [cache\_behaviors](#input\_cache\_behaviors) | Additional ordered cache behaviors keyed by path\_pattern, evaluated before default\_cache\_behavior in the order CloudFront receives them (map key order in this provider version). "*" is reserved for default\_cache\_behavior and rejected here. cache\_policy\_id null (the default) uses the AWS managed CachingOptimized policy. | <pre>map(object({<br/>    allowed_methods = optional(set(string), ["GET", "HEAD"])<br/>    cached_methods  = optional(set(string), ["GET", "HEAD"])<br/>    cache_policy_id = optional(string)<br/>    compress        = optional(bool, true)<br/>  }))</pre> | `{}` | no |
+| <a name="input_cache_behaviors"></a> [cache\_behaviors](#input\_cache\_behaviors) | Additional cache behaviors, evaluated before default\_cache\_behavior. CloudFront uses the FIRST behavior whose path\_pattern matches a request, and this list's order is exactly the order CloudFront receives them in: list a narrower pattern ("/static/images/*") before a broader one that also matches it ("/static/*"), or the narrower one never matches. path\_pattern must be non-empty and unique; "*" is reserved for default\_cache\_behavior and rejected here. cache\_policy\_id null (the default) uses the AWS managed CachingOptimized policy. CloudFront's default quota is 25 cache behaviors per distribution (adjustable through Service Quotas). | <pre>list(object({<br/>    path_pattern    = string<br/>    allowed_methods = optional(set(string), ["GET", "HEAD"])<br/>    cached_methods  = optional(set(string), ["GET", "HEAD"])<br/>    cache_policy_id = optional(string)<br/>    compress        = optional(bool, true)<br/>  }))</pre> | `[]` | no |
 | <a name="input_custom_error_responses"></a> [custom\_error\_responses](#input\_custom\_error\_responses) | SPA-style rewrites of origin error responses, for example serving /index.html with a 200 for a 404 from the origin. error\_code is the origin's HTTP status; response\_code and response\_page\_path, when set, together override what the viewer receives; error\_caching\_min\_ttl (default 300) is how long CloudFront caches the error itself. | <pre>list(object({<br/>    error_code            = number<br/>    response_code         = optional(number)<br/>    response_page_path    = optional(string)<br/>    error_caching_min_ttl = optional(number, 300)<br/>  }))</pre> | `[]` | no |
 | <a name="input_default_cache_behavior"></a> [default\_cache\_behavior](#input\_default\_cache\_behavior) | Cache behaviour for the distribution's default (path\_pattern = "*") behavior. cache\_policy\_id null (the default) uses the AWS managed CachingOptimized policy. | <pre>object({<br/>    allowed_methods = optional(set(string), ["GET", "HEAD"])<br/>    cached_methods  = optional(set(string), ["GET", "HEAD"])<br/>    cache_policy_id = optional(string)<br/>    compress        = optional(bool, true)<br/>  })</pre> | `{}` | no |
 | <a name="input_default_root_object"></a> [default\_root\_object](#input\_default\_root\_object) | Object requested at the distribution root (for example when a viewer requests /). Must not start with /. | `string` | `"index.html"` | no |
 | <a name="input_geo_restriction"></a> [geo\_restriction](#input\_geo\_restriction) | Geographic access restriction. restriction\_type none (the default) allows every viewer location; whitelist or blacklist require a non-empty locations set of ISO 3166-1 alpha-2 country codes. | <pre>object({<br/>    restriction_type = string<br/>    locations        = optional(set(string), [])<br/>  })</pre> | <pre>{<br/>  "restriction_type": "none"<br/>}</pre> | no |
 | <a name="input_logging"></a> [logging](#input\_logging) | Standard CloudFront access logging to a caller-owned S3 bucket. Off (null) by default; a check block advises turning it on. This module does not create or configure the logging bucket's ACLs or bucket-owner-enforced ownership. | <pre>object({<br/>    bucket_domain_name = string<br/>    prefix             = optional(string)<br/>  })</pre> | `null` | no |
-| <a name="input_minimum_protocol_version"></a> [minimum\_protocol\_version](#input\_minimum\_protocol\_version) | Minimum TLS version CloudFront negotiates with viewers when a custom viewer certificate is used (aliases non-empty). Ignored when the distribution uses the default certificate, which CloudFront always serves at its own fixed minimum version. | `string` | `"TLSv1.2_2021"` | no |
+| <a name="input_minimum_protocol_version"></a> [minimum\_protocol\_version](#input\_minimum\_protocol\_version) | CloudFront security policy (minimum TLS version and ciphers) for viewers when a custom viewer certificate is used (aliases non-empty). Accepts the TLS 1.2+ policies TLSv1.2\_2018, TLSv1.2\_2019, TLSv1.2\_2021 (the default), TLSv1.2\_2025, and TLSv1.3\_2025 (TLS 1.3 only); policies allowing deprecated TLS 1.0/1.1 are rejected. Ignored when the distribution uses the default certificate, which CloudFront always serves at its own fixed minimum version. | `string` | `"TLSv1.2_2021"` | no |
 | <a name="input_name"></a> [name](#input\_name) | Human-readable identifier for the distribution. CloudFront distributions have no name argument: this value becomes the distribution's comment, the Origin Access Control's name, and the default Name tag. At most 64 characters (the tighter of the two limits it drives) using letters, digits, spaces, dots, underscores, and hyphens. | `string` | n/a | yes |
 | <a name="input_origin"></a> [origin](#input\_origin) | The single S3 origin this distribution serves. bucket\_name and bucket\_regional\_domain\_name come from the bucket the caller owns (for example aws.modules.s3's aws\_s3\_bucket.this.bucket and .bucket\_regional\_domain\_name outputs); this module never creates or reaches into that bucket. origin\_path, when set, must start with / and not end with /, and scopes both the CloudFront origin path and the required\_bucket\_policy\_json output's Resource to that prefix. | <pre>object({<br/>    bucket_name                 = string<br/>    bucket_regional_domain_name = string<br/>    origin_path                 = optional(string, "")<br/>  })</pre> | n/a | yes |
-| <a name="input_partition"></a> [partition](#input\_partition) | AWS partition of the origin bucket's account (aws, aws-cn, aws-us-gov, ...), used only to render the Resource ARN in required\_bucket\_policy\_json. Null reads it through aws\_partition; pass it to avoid the lookup. | `string` | `null` | no |
+| <a name="input_partition"></a> [partition](#input\_partition) | AWS partition of the origin bucket's account, used only to render the Resource ARN in required\_bucket\_policy\_json. Only the standard "aws" partition is supported: CloudFront in the China Regions (aws-cn) supports neither Origin Access Control (this module's only origin access mechanism), ACM viewer certificates, nor AWS WAF, and AWS GovCloud (US) has no CloudFront, so a distribution this module builds cannot work in either. Any other value is rejected here, and a looked-up partition other than aws fails a precondition. Null reads it through aws\_partition; pass "aws" to skip the lookup. | `string` | `null` | no |
 | <a name="input_price_class"></a> [price\_class](#input\_price\_class) | Edge locations that serve the distribution. PriceClass\_100 (the default) is the cheapest: US, Canada, and Europe only. Opt into PriceClass\_200 (adds Asia, Africa, Oceania) or PriceClass\_All explicitly. | `string` | `"PriceClass_100"` | no |
 | <a name="input_tags"></a> [tags](#input\_tags) | Tags applied to the distribution. The module adds a Name tag (from name) only when you do not set one, and never overrides caller tags. | `map(string)` | `{}` | no |
 | <a name="input_viewer_certificate_arn"></a> [viewer\_certificate\_arn](#input\_viewer\_certificate\_arn) | ACM certificate ARN presented to viewers for a custom domain. Required when aliases is non-empty and forbidden when it is empty (the default *.cloudfront.net certificate already covers that case). CloudFront only ever reads viewer certificates from us-east-1, regardless of the origin bucket's region or this module's own provider region, so the ARN's region segment is validated here; the certificate itself must actually have been requested through a us-east-1 provider (see aws.modules.acm's cloudfront example) since Terraform cannot inspect where an ARN's resource was created, only what the ARN string says. | `string` | `null` | no |
-| <a name="input_web_acl_arn"></a> [web\_acl\_arn](#input\_web\_acl\_arn) | ARN of a CLOUDFRONT-scope WAFv2 Web ACL (from aws.modules.waf) to associate with the distribution. Optional, but a check block advises setting it: ADR 0004 places a global WAF at every entry layer. A CLOUDFRONT-scope Web ACL's ARN carries the literal segment "global" where a REGIONAL-scope ARN would carry a region, so unlike viewer\_certificate\_arn there is no region string to check against us-east-1 here; only that the caller actually created the ACL through a us-east-1 provider proves the scope, and Terraform cannot inspect that. See docs/DESIGN.md. | `string` | `null` | no |
+| <a name="input_web_acl_arn"></a> [web\_acl\_arn](#input\_web\_acl\_arn) | ARN of a CLOUDFRONT-scope WAFv2 Web ACL (for example aws.modules.waf's web\_acl\_arn output with scope = "CLOUDFRONT") to associate with the distribution. Optional, but a check block advises setting it: ADR 0004 places a global WAF at every entry layer. AWS issues a CLOUDFRONT-scope Web ACL's ARN as arn:<partition>:wafv2:us-east-1:<account>:global/webacl/<name>/<id>: the region segment is the real region us-east-1 (the only region WAFv2 accepts CLOUDFRONT-scope ACLs from) and "global" appears only in the resource segment. Both are validated, so a REGIONAL-scope ARN (regional/webacl/...) or a CLOUDFRONT-shaped ARN naming any other region is rejected at plan time. <name> accepts letters, digits, hyphens, and underscores, the same characters aws.modules.waf and the WAFv2 API allow. See docs/DESIGN.md. | `string` | `null` | no |
 
 ## Outputs
 
@@ -256,4 +298,5 @@ No modules.
 | <a name="output_hosted_zone_id"></a> [hosted\_zone\_id](#output\_hosted\_zone\_id) | CloudFront's fixed alias-target hosted zone ID (Z2FDTNDATAQYW2 in the standard aws partition), for a Route 53 alias record via aws.modules.route53. It identifies CloudFront as an alias target class, not a zone this distribution owns. |
 | <a name="output_origin_access_control_id"></a> [origin\_access\_control\_id](#output\_origin\_access\_control\_id) | ID of the Origin Access Control this distribution reads the S3 origin through. |
 | <a name="output_required_bucket_policy_json"></a> [required\_bucket\_policy\_json](#output\_required\_bucket\_policy\_json) | The exact IAM policy STATEMENT (not a full policy document) the origin bucket needs, as a JSON string: grants cloudfront.amazonaws.com s3:GetObject on the origin path, scoped by a Condition.StringEquals["AWS:SourceArn"] to this distribution's own ARN. Merge it (jsondecode it first) into a standalone aws\_s3\_bucket\_policy's statement list, or translate it into aws.modules.s3's own typed bucket\_policy\_statements input (its principals and conditions fields have a different shape than raw IAM JSON); this module cannot attach it itself because it does not own the bucket. A missing or wrong SourceArn here would let any CloudFront distribution in the account read the bucket, not just this one. |
+| <a name="output_required_kms_key_policy_json"></a> [required\_kms\_key\_policy\_json](#output\_required\_kms\_key\_policy\_json) | The KMS key-policy STATEMENT (not a full policy document) the origin bucket's encryption key needs when objects are encrypted with SSE-KMS (aws:kms or aws:kms:dsse) under a CUSTOMER MANAGED key, as a JSON string: grants cloudfront.amazonaws.com kms:Decrypt, scoped by Condition.StringEquals["AWS:SourceArn"] to this distribution's own ARN. Add it (jsondecode it first) to that key's policy. Not needed for SSE-S3 (AES256). It cannot be used with the AWS managed aws/s3 key, whose key policy cannot be edited: OAC cannot read objects encrypted under aws/s3, so use a customer managed key or SSE-S3 instead (aws.modules.s3 defaults to aws:kms with aws/s3 when kms\_key\_arn is null). Without this statement CloudFront fails closed: every object request returns 403 AccessDenied. |
 <!-- END_TF_DOCS -->

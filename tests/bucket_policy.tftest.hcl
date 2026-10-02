@@ -31,7 +31,7 @@ variables {
     bucket_name                 = "static-site-origin"
     bucket_regional_domain_name = "static-site-origin.s3.us-east-1.amazonaws.com"
   }
-  web_acl_arn = "arn:aws:wafv2:global:123456789012:global/webacl/static-site/11111111-1111-1111-1111-111111111111"
+  web_acl_arn = "arn:aws:wafv2:us-east-1:123456789012:global/webacl/static-site/11111111-1111-1111-1111-111111111111"
   logging = {
     bucket_domain_name = "static-site-logs.s3.amazonaws.com"
   }
@@ -92,11 +92,38 @@ run "honours_a_caller_supplied_partition" {
   command = apply
 
   variables {
-    partition = "aws-us-gov"
+    partition = "aws"
   }
 
   assert {
-    condition     = jsondecode(output.required_bucket_policy_json).Resource == "arn:aws-us-gov:s3:::static-site-origin/*"
-    error_message = "A caller-supplied partition must render in the statement's Resource ARN instead of the looked-up one."
+    condition     = length(data.aws_partition.current) == 0 && jsondecode(output.required_bucket_policy_json).Resource == "arn:aws:s3:::static-site-origin/*"
+    error_message = "A caller-supplied partition must skip the lookup and render in the statement's Resource ARN."
+  }
+}
+
+# required_kms_key_policy_json: the key-policy statement an SSE-KMS origin's
+# customer managed key needs. Same SourceArn scoping property as the bucket
+# statement, and read-only (kms:Decrypt) to match the s3:GetObject grant.
+run "scopes_the_kms_key_policy_statement_to_this_distributions_own_arn" {
+  command = apply
+
+  assert {
+    condition     = jsondecode(output.required_kms_key_policy_json).Condition.StringEquals["AWS:SourceArn"] == aws_cloudfront_distribution.this.arn
+    error_message = "required_kms_key_policy_json's AWS:SourceArn condition must equal this distribution's own ARN, or any distribution in the account could decrypt with the key."
+  }
+
+  assert {
+    condition     = jsondecode(output.required_kms_key_policy_json).Effect == "Allow" && jsondecode(output.required_kms_key_policy_json).Principal.Service == "cloudfront.amazonaws.com"
+    error_message = "The KMS statement must allow only the cloudfront.amazonaws.com service principal."
+  }
+
+  assert {
+    condition     = jsondecode(output.required_kms_key_policy_json).Action == "kms:Decrypt"
+    error_message = "The KMS statement must grant only kms:Decrypt: the distribution only reads (s3:GetObject), so it never needs Encrypt or GenerateDataKey."
+  }
+
+  assert {
+    condition     = jsondecode(output.required_kms_key_policy_json).Resource == "*" && jsondecode(output.required_kms_key_policy_json).Sid == "AllowCloudFrontServicePrincipalSSEKMSDecrypt"
+    error_message = "In a key policy Resource \"*\" means the key the policy is attached to; the statement must also carry a stable Sid."
   }
 }

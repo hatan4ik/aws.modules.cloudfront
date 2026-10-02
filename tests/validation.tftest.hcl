@@ -1,4 +1,10 @@
-mock_provider "aws" {}
+# The module supports only the standard aws partition (see variables.tf's
+# partition), so the mocked partition lookup must return it.
+mock_provider "aws" {
+  mock_data "aws_partition" {
+    defaults = { partition = "aws" }
+  }
+}
 
 variables {
   name = "static-site"
@@ -6,7 +12,7 @@ variables {
     bucket_name                 = "static-site-origin"
     bucket_regional_domain_name = "static-site-origin.s3.us-east-1.amazonaws.com"
   }
-  web_acl_arn = "arn:aws:wafv2:global:123456789012:global/webacl/static-site/11111111-1111-1111-1111-111111111111"
+  web_acl_arn = "arn:aws:wafv2:us-east-1:123456789012:global/webacl/static-site/11111111-1111-1111-1111-111111111111"
   logging = {
     bucket_domain_name = "static-site-logs.s3.amazonaws.com"
   }
@@ -149,9 +155,133 @@ run "rejects_an_unknown_minimum_protocol_version" {
   expect_failures = [var.minimum_protocol_version]
 }
 
+run "accepts_the_2025_tls_security_policies" {
+  command = plan
+  variables {
+    aliases                  = ["app.example.com"]
+    viewer_certificate_arn   = "arn:aws:acm:us-east-1:123456789012:certificate/11111111-2222-3333-4444-555555555555"
+    minimum_protocol_version = "TLSv1.3_2025"
+  }
+
+  assert {
+    condition     = aws_cloudfront_distribution.this.viewer_certificate[0].minimum_protocol_version == "TLSv1.3_2025"
+    error_message = "TLSv1.3_2025 must be accepted and rendered."
+  }
+}
+
+run "accepts_tlsv1_2_2025" {
+  command = plan
+  variables {
+    aliases                  = ["app.example.com"]
+    viewer_certificate_arn   = "arn:aws:acm:us-east-1:123456789012:certificate/11111111-2222-3333-4444-555555555555"
+    minimum_protocol_version = "TLSv1.2_2025"
+  }
+}
+
+run "rejects_tlsv1" {
+  command = plan
+  variables { minimum_protocol_version = "TLSv1" }
+  expect_failures = [var.minimum_protocol_version]
+}
+
+run "rejects_tlsv1_2016" {
+  command = plan
+  variables { minimum_protocol_version = "TLSv1_2016" }
+  expect_failures = [var.minimum_protocol_version]
+}
+
+run "rejects_tlsv1_1_2016" {
+  command = plan
+  variables { minimum_protocol_version = "TLSv1.1_2016" }
+  expect_failures = [var.minimum_protocol_version]
+}
+
+# ---------------------------------------------------------------------------
+# partition: only the standard aws partition is supported
+# ---------------------------------------------------------------------------
+
+run "accepts_the_aws_partition" {
+  command = plan
+  variables { partition = "aws" }
+
+  assert {
+    condition     = length(data.aws_partition.current) == 0
+    error_message = "A caller-supplied partition must skip the aws_partition lookup."
+  }
+}
+
+run "rejects_the_aws_cn_partition" {
+  command = plan
+  variables { partition = "aws-cn" }
+  expect_failures = [var.partition]
+}
+
+run "rejects_the_aws_us_gov_partition" {
+  command = plan
+  variables { partition = "aws-us-gov" }
+  expect_failures = [var.partition]
+}
+
+run "rejects_a_looked_up_partition_other_than_aws" {
+  command = plan
+
+  override_data {
+    target = data.aws_partition.current
+    values = { partition = "aws-cn" }
+  }
+
+  expect_failures = [aws_cloudfront_distribution.this]
+}
+
 # ---------------------------------------------------------------------------
 # web_acl_arn
 # ---------------------------------------------------------------------------
+#
+# AWS issues a CLOUDFRONT-scope WAFv2 Web ACL ARN with the real region
+# us-east-1 in the ARN's region segment; "global" appears only in the
+# resource segment (global/webacl/...). These fixtures use that real shape,
+# exactly what aws.modules.waf's web_acl_arn output returns for
+# scope = "CLOUDFRONT" (the example ARN in the WAFv2 developer guide is
+# arn:aws:wafv2:us-east-1:111122223333:global/webacl/ExampleWebACL/<uuid>).
+
+run "accepts_a_real_cloudfront_scope_web_acl_arn" {
+  command = plan
+  variables {
+    web_acl_arn = "arn:aws:wafv2:us-east-1:123456789012:global/webacl/ExampleWebACL/473e64fd-f30b-4765-81a0-62ad96dd167a"
+  }
+
+  assert {
+    condition     = aws_cloudfront_distribution.this.web_acl_id == "arn:aws:wafv2:us-east-1:123456789012:global/webacl/ExampleWebACL/473e64fd-f30b-4765-81a0-62ad96dd167a"
+    error_message = "A real CLOUDFRONT-scope Web ACL ARN must be accepted and passed through to web_acl_id unchanged."
+  }
+}
+
+run "accepts_a_web_acl_name_with_underscores" {
+  # aws.modules.waf (and the WAFv2 API, ^[\w\-]+$) allow underscores in a
+  # Web ACL name, so its real output for an ACL named api_acl must compose.
+  command = plan
+  variables {
+    web_acl_arn = "arn:aws:wafv2:us-east-1:123456789012:global/webacl/api_acl/473e64fd-f30b-4765-81a0-62ad96dd167a"
+  }
+}
+
+run "rejects_the_fabricated_global_region_web_acl_arn_shape" {
+  # v1.0.0 required this shape, which AWS never issues: a CLOUDFRONT-scope ARN
+  # carries us-east-1, not "global", in its region segment.
+  command = plan
+  variables {
+    web_acl_arn = "arn:aws:wafv2:global:123456789012:global/webacl/example/11111111-1111-1111-1111-111111111111"
+  }
+  expect_failures = [var.web_acl_arn]
+}
+
+run "rejects_a_cloudfront_scope_shaped_arn_outside_us_east_1" {
+  command = plan
+  variables {
+    web_acl_arn = "arn:aws:wafv2:eu-west-1:123456789012:global/webacl/example/11111111-1111-1111-1111-111111111111"
+  }
+  expect_failures = [var.web_acl_arn]
+}
 
 run "rejects_a_regional_scope_web_acl_arn" {
   command = plan
@@ -164,14 +294,15 @@ run "rejects_a_regional_scope_web_acl_arn" {
 run "rejects_a_malformed_web_acl_arn" {
   command = plan
   variables {
-    web_acl_arn = "arn:aws:wafv2:global:123456789012:global/webacl/example"
+    web_acl_arn = "arn:aws:wafv2:us-east-1:123456789012:global/webacl/example"
   }
   expect_failures = [var.web_acl_arn]
 }
 
-run "accepts_a_well_formed_cloudfront_scope_web_acl_arn" {
+run "rejects_a_web_acl_name_with_disallowed_characters" {
   command = plan
   variables {
-    web_acl_arn = "arn:aws:wafv2:global:123456789012:global/webacl/example/11111111-1111-1111-1111-111111111111"
+    web_acl_arn = "arn:aws:wafv2:us-east-1:123456789012:global/webacl/api.acl/11111111-1111-1111-1111-111111111111"
   }
+  expect_failures = [var.web_acl_arn]
 }
