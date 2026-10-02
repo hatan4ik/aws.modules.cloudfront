@@ -92,11 +92,11 @@ run "honours_a_caller_supplied_partition" {
   command = apply
 
   variables {
-    partition = "aws-us-gov"
+    partition = "aws"
   }
 
   assert {
-    condition     = jsondecode(output.required_bucket_policy_json).Resource == "arn:aws-us-gov:s3:::static-site-origin/*"
-    error_message = "A caller-supplied partition must render in the statement's Resource ARN instead of the looked-up one."
+    condition     = length(data.aws_partition.current) == 0 && jsondecode(output.required_bucket_policy_json).Resource == "arn:aws:s3:::static-site-origin/*"
+    error_message = "A caller-supplied partition must skip the lookup and render in the statement's Resource ARN."
   }
 }

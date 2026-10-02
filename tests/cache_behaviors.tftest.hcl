@@ -1,4 +1,10 @@
-mock_provider "aws" {}
+# The module supports only the standard aws partition (see variables.tf's
+# partition), so the mocked partition lookup must return it.
+mock_provider "aws" {
+  mock_data "aws_partition" {
+    defaults = { partition = "aws" }
+  }
+}
 
 variables {
   name = "static-site"

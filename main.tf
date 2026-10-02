@@ -115,6 +115,11 @@ resource "aws_cloudfront_distribution" "this" {
 
   lifecycle {
     precondition {
+      condition     = local.partition == "aws"
+      error_message = "This module supports only the standard aws partition. CloudFront in aws-cn supports neither Origin Access Control, ACM viewer certificates, nor WAF, and aws-us-gov has no CloudFront; hosted_zone_id would also be wrong outside aws."
+    }
+
+    precondition {
       condition     = local.has_aliases ? var.viewer_certificate_arn != null : true
       error_message = "viewer_certificate_arn is required when aliases is non-empty: CloudFront cannot serve a custom domain with only the default *.cloudfront.net certificate."
     }

@@ -1,4 +1,10 @@
-mock_provider "aws" {}
+# The module supports only the standard aws partition (see variables.tf's
+# partition), so the mocked partition lookup must return it.
+mock_provider "aws" {
+  mock_data "aws_partition" {
+    defaults = { partition = "aws" }
+  }
+}
 
 variables {
   name = "static-site"
@@ -147,6 +153,84 @@ run "rejects_an_unknown_minimum_protocol_version" {
   command = plan
   variables { minimum_protocol_version = "TLSv1.3" }
   expect_failures = [var.minimum_protocol_version]
+}
+
+run "accepts_the_2025_tls_security_policies" {
+  command = plan
+  variables {
+    aliases                  = ["app.example.com"]
+    viewer_certificate_arn   = "arn:aws:acm:us-east-1:123456789012:certificate/11111111-2222-3333-4444-555555555555"
+    minimum_protocol_version = "TLSv1.3_2025"
+  }
+
+  assert {
+    condition     = aws_cloudfront_distribution.this.viewer_certificate[0].minimum_protocol_version == "TLSv1.3_2025"
+    error_message = "TLSv1.3_2025 must be accepted and rendered."
+  }
+}
+
+run "accepts_tlsv1_2_2025" {
+  command = plan
+  variables {
+    aliases                  = ["app.example.com"]
+    viewer_certificate_arn   = "arn:aws:acm:us-east-1:123456789012:certificate/11111111-2222-3333-4444-555555555555"
+    minimum_protocol_version = "TLSv1.2_2025"
+  }
+}
+
+run "rejects_tlsv1" {
+  command = plan
+  variables { minimum_protocol_version = "TLSv1" }
+  expect_failures = [var.minimum_protocol_version]
+}
+
+run "rejects_tlsv1_2016" {
+  command = plan
+  variables { minimum_protocol_version = "TLSv1_2016" }
+  expect_failures = [var.minimum_protocol_version]
+}
+
+run "rejects_tlsv1_1_2016" {
+  command = plan
+  variables { minimum_protocol_version = "TLSv1.1_2016" }
+  expect_failures = [var.minimum_protocol_version]
+}
+
+# ---------------------------------------------------------------------------
+# partition: only the standard aws partition is supported
+# ---------------------------------------------------------------------------
+
+run "accepts_the_aws_partition" {
+  command = plan
+  variables { partition = "aws" }
+
+  assert {
+    condition     = length(data.aws_partition.current) == 0
+    error_message = "A caller-supplied partition must skip the aws_partition lookup."
+  }
+}
+
+run "rejects_the_aws_cn_partition" {
+  command = plan
+  variables { partition = "aws-cn" }
+  expect_failures = [var.partition]
+}
+
+run "rejects_the_aws_us_gov_partition" {
+  command = plan
+  variables { partition = "aws-us-gov" }
+  expect_failures = [var.partition]
+}
+
+run "rejects_a_looked_up_partition_other_than_aws" {
+  command = plan
+
+  override_data {
+    target = data.aws_partition.current
+    values = { partition = "aws-cn" }
+  }
+
+  expect_failures = [aws_cloudfront_distribution.this]
 }
 
 # ---------------------------------------------------------------------------

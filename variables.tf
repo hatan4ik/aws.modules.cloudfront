@@ -43,13 +43,13 @@ variable "origin" {
 }
 
 variable "partition" {
-  description = "AWS partition of the origin bucket's account (aws, aws-cn, aws-us-gov, ...), used only to render the Resource ARN in required_bucket_policy_json. Null reads it through aws_partition; pass it to avoid the lookup."
+  description = "AWS partition of the origin bucket's account, used only to render the Resource ARN in required_bucket_policy_json. Only the standard \"aws\" partition is supported: CloudFront in the China Regions (aws-cn) supports neither Origin Access Control (this module's only origin access mechanism), ACM viewer certificates, nor AWS WAF, and AWS GovCloud (US) has no CloudFront, so a distribution this module builds cannot work in either. Any other value is rejected here, and a looked-up partition other than aws fails a precondition. Null reads it through aws_partition; pass \"aws\" to skip the lookup."
   type        = string
   default     = null
 
   validation {
-    condition     = var.partition == null ? true : can(regex("^aws(-[a-z]+)*$", var.partition))
-    error_message = "partition must be aws or an aws-<suffix> partition such as aws-cn or aws-us-gov."
+    condition     = var.partition == null ? true : var.partition == "aws"
+    error_message = "partition must be aws (or null to look it up). aws-cn and aws-us-gov are not supported: CloudFront there lacks Origin Access Control, ACM certificates, and WAF (aws-cn) or does not exist (aws-us-gov)."
   }
 }
 
@@ -105,14 +105,14 @@ variable "viewer_certificate_arn" {
 }
 
 variable "minimum_protocol_version" {
-  description = "Minimum TLS version CloudFront negotiates with viewers when a custom viewer certificate is used (aliases non-empty). Ignored when the distribution uses the default certificate, which CloudFront always serves at its own fixed minimum version."
+  description = "CloudFront security policy (minimum TLS version and ciphers) for viewers when a custom viewer certificate is used (aliases non-empty). Accepts the TLS 1.2+ policies TLSv1.2_2018, TLSv1.2_2019, TLSv1.2_2021 (the default), TLSv1.2_2025, and TLSv1.3_2025 (TLS 1.3 only); policies allowing deprecated TLS 1.0/1.1 are rejected. Ignored when the distribution uses the default certificate, which CloudFront always serves at its own fixed minimum version."
   type        = string
   default     = "TLSv1.2_2021"
   nullable    = false
 
   validation {
-    condition     = contains(["TLSv1", "TLSv1_2016", "TLSv1.1_2016", "TLSv1.2_2018", "TLSv1.2_2019", "TLSv1.2_2021"], var.minimum_protocol_version)
-    error_message = "minimum_protocol_version must be one of TLSv1, TLSv1_2016, TLSv1.1_2016, TLSv1.2_2018, TLSv1.2_2019, or TLSv1.2_2021."
+    condition     = contains(["TLSv1.2_2018", "TLSv1.2_2019", "TLSv1.2_2021", "TLSv1.2_2025", "TLSv1.3_2025"], var.minimum_protocol_version)
+    error_message = "minimum_protocol_version must be one of TLSv1.2_2018, TLSv1.2_2019, TLSv1.2_2021, TLSv1.2_2025, or TLSv1.3_2025. Policies that allow TLS 1.0 or 1.1 (TLSv1, TLSv1_2016, TLSv1.1_2016) are not accepted."
   }
 }
 

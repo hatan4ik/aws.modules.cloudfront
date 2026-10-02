@@ -145,7 +145,16 @@ that run is actually testing.
 - `partition` — optional; falls back to `data.aws_partition` only to render
   `required_bucket_policy_json`'s `Resource` ARN. The one documented
   exception to "no data sources," following `aws.modules.ksm`'s precedent for
-  the same reasoning.
+  the same reasoning. Only `aws` is accepted (a validation on the input and a
+  resource precondition on the looked-up value), since v2.0.0. v1.x accepted
+  any partition while always returning the standard partition's
+  `hosted_zone_id`, which is wrong in China (CloudFront there uses
+  `Z3RFFRIM2A3IF5`). Making the ID partition-aware would not have made the
+  module work there: CloudFront in the China Regions supports neither Origin
+  Access Control (this module's only origin access mechanism) nor ACM viewer
+  certificates nor AWS WAF, and AWS GovCloud (US) has no CloudFront. So the
+  honest fix is to reject the unsupported partitions rather than produce a
+  correct-looking output for a configuration that cannot apply.
 - `price_class`, `default_root_object`, `aliases`, `viewer_certificate_arn`,
   `minimum_protocol_version`, `web_acl_arn`, `geo_restriction`, `logging`,
   `custom_error_responses`, `default_cache_behavior`, `cache_behaviors`,
@@ -183,8 +192,8 @@ supplies their own managed or customer-managed policy ID.
 `origin_access_control_id`, `required_bucket_policy_json`. `hosted_zone_id`
 is a fixed constant (`Z2FDTNDATAQYW2`), not a resource attribute lookup: it
 identifies "an alias target is a CloudFront distribution" to Route 53, the
-same value for every distribution in the standard `aws` partition, documented
-by AWS rather than something this module could look up per-distribution. It
+same value for every distribution in the standard `aws` partition (the only
+partition this module supports; see `partition` above), documented by AWS rather than something this module could look up per-distribution. It
 is deliberately a `local`, not `aws_cloudfront_distribution.this.hosted_zone_id`,
 so that it stays knowable at plan time instead of turning every output into an
 apply-only assertion in `tests/`.

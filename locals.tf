@@ -7,6 +7,10 @@ locals {
   # CloudFront's alias-target hosted zone ID is fixed for every distribution
   # in the standard aws partition (documented by AWS, not looked up); see
   # docs/DESIGN.md. It is not the ID of a zone this module owns or creates.
+  # Correct because the module supports only the aws partition (enforced by
+  # var.partition's validation and a precondition in main.tf); CloudFront in
+  # aws-cn uses a different ID (Z3RFFRIM2A3IF5) but cannot serve this
+  # module's OAC-based origin at all.
   cloudfront_hosted_zone_id = "Z2FDTNDATAQYW2"
 
   # AWS managed cache policy "CachingOptimized" (max TTL 1 year, gzip/br
