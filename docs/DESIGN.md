@@ -18,7 +18,7 @@ The module creates:
 - One `aws_cloudfront_origin_access_control` (OAC, not the legacy Origin
   Access Identity).
 - One `aws_cloudfront_distribution` with a default cache behavior, any number
-  of additional ordered cache behaviors keyed by path pattern, geographic
+  of additional ordered cache behaviors (a list, in precedence order), geographic
   restriction, custom error responses, optional access logging, and an
   optional WAF Web ACL association.
 - A rendered IAM policy **statement** (not a full document) that the caller
@@ -152,13 +152,24 @@ that run is actually testing.
   `tags` — see the README's generated reference for full descriptions,
   defaults, and validations.
 
-`cache_behaviors` is a map keyed by `path_pattern`. `"*"` is rejected as a key
-(a variable validation) because it is reserved for `default_cache_behavior`,
-configured as a separate input entirely — CloudFront's own model already
-treats the default behavior specially (it is the fallback with no
-`path_pattern` of its own), and letting a caller spell that out as a
-`cache_behaviors["*"]` entry would create two different-looking ways to
-configure the same thing with different validation paths.
+`cache_behaviors` is an ordered `list(object({ path_pattern, ... }))`, not a
+map. CloudFront evaluates ordered cache behaviors in the order it receives
+them and uses the **first** whose `path_pattern` matches; the list order is
+therefore the precedence order, and the `dynamic "ordered_cache_behavior"`
+block iterates the list unchanged. v1.x keyed the input by `path_pattern` in a
+map, and a `dynamic` block over a map iterates in lexical key order, so
+`"/static/*"` always rendered before `"/static/images/*"` and the narrower
+pattern could never match — precedence decided by string sort, not by the
+caller. The list makes intent explicit at the cost of a breaking interface
+change (v2.0.0; see [UPGRADE-2.0.md](UPGRADE-2.0.md)). Because a list, unlike
+map keys, can repeat a value, `path_pattern` uniqueness and non-emptiness are
+now variable validations. `"*"` is rejected as a `path_pattern` because it is
+reserved for `default_cache_behavior`, configured as a separate input
+entirely — CloudFront's own model already treats the default behavior
+specially (it is the fallback with no `path_pattern` of its own), and letting
+a caller spell it out as a `cache_behaviors` entry would create two
+different-looking ways to configure the same thing with different validation
+paths.
 
 `cache_policy_id` in both `default_cache_behavior` and every `cache_behaviors`
 entry defaults (when left `null`) to the AWS managed **CachingOptimized**
@@ -199,10 +210,10 @@ back into unilaterally.
   rendered bucket-policy statement. `main.tf` holds the resources,
   `locals.tf` the pure rendering logic, `checks.tf` the advisory posture.
 - **Open/closed.** New cache behaviors, aliases, geo-restriction entries, and
-  custom error responses arrive as data (map/set/list entries); no branch of
+  custom error responses arrive as data (list/set entries); no branch of
   the module needs editing to add one.
 - **Liskov substitution.** Every `cache_behaviors` entry and
-  `default_cache_behavior` share exactly the same object shape and default
+  `default_cache_behavior` share exactly the same settings and default
   resolution (`allowed_methods`, `cached_methods`, `cache_policy_id`,
   `compress`), so a path pattern's behavior can be promoted to the default
   behavior (or vice versa) by moving the object, not rewriting it.

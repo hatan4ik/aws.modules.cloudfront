@@ -22,14 +22,19 @@ locals {
     compress        = var.default_cache_behavior.compress
   }
 
-  cache_behaviors = {
-    for path_pattern, behavior in var.cache_behaviors : path_pattern => {
+  # A list, not a map: CloudFront matches the first ordered behavior whose
+  # path_pattern matches, so the caller's list order is the precedence order
+  # and must reach the dynamic block unchanged (a map would iterate in
+  # lexical key order instead).
+  cache_behaviors = [
+    for behavior in var.cache_behaviors : {
+      path_pattern    = behavior.path_pattern
       allowed_methods = behavior.allowed_methods
       cached_methods  = behavior.cached_methods
       cache_policy_id = coalesce(behavior.cache_policy_id, local.caching_optimized_policy_id)
       compress        = behavior.compress
     }
-  }
+  ]
 
   # The bucket-side statement the caller must merge into the origin bucket's
   # policy (aws.modules.s3's additional_bucket_policy_statements, or a plain

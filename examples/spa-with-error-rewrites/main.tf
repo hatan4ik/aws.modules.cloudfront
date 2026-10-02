@@ -36,7 +36,10 @@ module "distribution" {
     cache_policy_id = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS managed CachingDisabled
   }
 
-  cache_behaviors = {
-    "/static/*" = {}
-  }
+  # A list: CloudFront uses the first matching behavior, in this order. A
+  # narrower pattern (say "/static/images/*") must be listed before
+  # "/static/*" to ever match.
+  cache_behaviors = [
+    { path_pattern = "/static/*" },
+  ]
 }

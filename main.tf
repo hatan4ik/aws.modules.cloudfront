@@ -43,11 +43,13 @@ resource "aws_cloudfront_distribution" "this" {
     compress               = local.default_cache_behavior.compress
   }
 
+  # Iterates a list, so behaviors render in the caller's declared order,
+  # which is the order CloudFront evaluates them in (first match wins).
   dynamic "ordered_cache_behavior" {
     for_each = local.cache_behaviors
 
     content {
-      path_pattern           = ordered_cache_behavior.key
+      path_pattern           = ordered_cache_behavior.value.path_pattern
       target_origin_id       = var.origin.bucket_name
       viewer_protocol_policy = "redirect-to-https"
       allowed_methods        = sort(tolist(ordered_cache_behavior.value.allowed_methods))

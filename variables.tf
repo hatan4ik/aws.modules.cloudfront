@@ -215,19 +215,30 @@ variable "default_cache_behavior" {
 }
 
 variable "cache_behaviors" {
-  description = "Additional ordered cache behaviors keyed by path_pattern, evaluated before default_cache_behavior in the order CloudFront receives them (map key order in this provider version). \"*\" is reserved for default_cache_behavior and rejected here. cache_policy_id null (the default) uses the AWS managed CachingOptimized policy."
-  type = map(object({
+  description = "Additional cache behaviors, evaluated before default_cache_behavior. CloudFront uses the FIRST behavior whose path_pattern matches a request, and this list's order is exactly the order CloudFront receives them in: list a narrower pattern (\"/static/images/*\") before a broader one that also matches it (\"/static/*\"), or the narrower one never matches. path_pattern must be non-empty and unique; \"*\" is reserved for default_cache_behavior and rejected here. cache_policy_id null (the default) uses the AWS managed CachingOptimized policy. CloudFront's default quota is 25 cache behaviors per distribution (adjustable through Service Quotas)."
+  type = list(object({
+    path_pattern    = string
     allowed_methods = optional(set(string), ["GET", "HEAD"])
     cached_methods  = optional(set(string), ["GET", "HEAD"])
     cache_policy_id = optional(string)
     compress        = optional(bool, true)
   }))
-  default  = {}
+  default  = []
   nullable = false
 
   validation {
-    condition     = !contains(keys(var.cache_behaviors), "*")
-    error_message = "cache_behaviors must not use \"*\" as a key: it is reserved for default_cache_behavior, configured separately."
+    condition     = alltrue([for behavior in var.cache_behaviors : behavior.path_pattern != "*"])
+    error_message = "cache_behaviors must not use \"*\" as a path_pattern: it is reserved for default_cache_behavior, configured separately."
+  }
+
+  validation {
+    condition     = alltrue([for behavior in var.cache_behaviors : length(behavior.path_pattern) > 0])
+    error_message = "Every cache_behaviors[*].path_pattern must be non-empty."
+  }
+
+  validation {
+    condition     = length(distinct([for behavior in var.cache_behaviors : behavior.path_pattern])) == length(var.cache_behaviors)
+    error_message = "cache_behaviors path_pattern values must be unique: a second behavior with the same pattern could never match."
   }
 }
 
