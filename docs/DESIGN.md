@@ -309,5 +309,7 @@ root (one distribution, one origin, one OAC)
 
 ## Migration
 
-Not applicable: this is a new module with no prior release. There is no
-`docs/UPGRADE-1.0.md`.
+v1.0.0 was a new module with no prior release (no `docs/UPGRADE-1.0.md`).
+v2.0.0's breaking changes (`cache_behaviors` map to ordered list, removed
+TLS 1.0/1.1 security policies, `aws`-only `partition`) are covered step by
+step in [UPGRADE-2.0.md](UPGRADE-2.0.md).
