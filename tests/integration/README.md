@@ -17,7 +17,7 @@ never creates or reaches into its own origin bucket - see
 
 | Suite | What it proves | Needs | Typical time |
 | --- | --- | --- | --- |
-| `smoke.tftest.hcl` | A distribution with the module's defaults (no aliases, the default `*.cloudfront.net` certificate, `PriceClass_100`, no WAF, no logging) is accepted by the real CloudFront API against the fixture bucket, `hosted_zone_id` still matches the fixed constant asserted under `mock_provider`, and - the module's most important correctness property - `required_bucket_policy_json`'s `AWS:SourceArn` equals this real distribution's own ARN. | credentials, region | 15-25 minutes each way |
+| `smoke.tftest.hcl` | A distribution with the module's defaults (no aliases, the default `*.cloudfront.net` certificate, `PriceClass_100`, no WAF, no logging) is accepted by the real CloudFront API against the fixture bucket, `hosted_zone_id` still matches the fixed constant asserted under `mock_provider`, and - the module's most important correctness property - `required_bucket_policy_json`'s `AWS:SourceArn` equals this real distribution's own ARN. The OAC read path is then proven end to end through [`probe/`](probe/): a known object fetched through the distribution returns `403` with no bucket policy, and `200` with its exact body once the module's rendered statement is attached as the bucket's only grant. | credentials, region | 15-25 minutes each way |
 
 **CloudFront distributions are slow, both to create and to delete.**
 `aws_cloudfront_distribution` waits for the distribution to reach `Deployed`
@@ -45,7 +45,7 @@ disposable distribution the same way, because `CreateDistribution` and
 before the distribution or the OAC exists.
 
 `terraform test` runs `tests/` only by default, so this suite never runs in
-the credential-free quality pipeline. The fixture module is excluded from
+the credential-free quality pipeline. The fixture and probe modules are excluded from
 the Checkov and Trivy scans (`.checkov.yml`, `trivy.yaml`) because it is
 short-lived test scaffolding, not a deployable pattern.
 

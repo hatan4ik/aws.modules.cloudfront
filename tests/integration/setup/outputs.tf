@@ -17,3 +17,13 @@ output "tags" {
   description = "Identifying tags applied to the origin bucket."
   value       = local.tags
 }
+
+output "probe_object_key" {
+  description = "Key of the known object the smoke suite fetches through the distribution."
+  value       = aws_s3_object.probe.key
+}
+
+output "probe_object_body" {
+  description = "Exact body of the probe object, which a successful fetch through the distribution must return."
+  value       = local.probe_body
+}

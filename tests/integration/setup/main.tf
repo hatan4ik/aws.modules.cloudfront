@@ -14,6 +14,7 @@ resource "random_id" "suffix" {
 
 locals {
   bucket_name = "${var.name_prefix}-${random_id.suffix.hex}"
+  probe_body  = "aws.modules.cloudfront integration probe ${random_id.suffix.hex}"
 
   tags = merge(var.tags, {
     IntegrationTest = "aws.modules.cloudfront"
@@ -48,4 +49,18 @@ resource "aws_s3_bucket_ownership_controls" "origin" {
   rule {
     object_ownership = "BucketOwnerEnforced"
   }
+}
+
+# One known object for the smoke suite to fetch through the distribution, so
+# it can prove the OAC read path end to end: denied (403) before the module's
+# required_bucket_policy_json is attached, served (200, this exact body)
+# after. SSE-S3 (the S3 default for a new bucket), so no KMS key policy is
+# involved; see the README's "SSE-KMS origins" section for that case.
+resource "aws_s3_object" "probe" {
+  bucket       = aws_s3_bucket.origin.id
+  key          = "index.html"
+  content      = local.probe_body
+  content_type = "text/html"
+
+  depends_on = [aws_s3_bucket_ownership_controls.origin]
 }

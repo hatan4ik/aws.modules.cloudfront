@@ -7,7 +7,10 @@
 # aws.modules.s3, per the module's brief - see its own file header), the
 # module under test is applied against that bucket with otherwise every
 # default, the results are asserted against the real CloudFront and S3 APIs,
-# and everything is destroyed at the end of the file.
+# the OAC read path is exercised by fetching a known object through the
+# distribution before (403) and after (200) attaching the module's rendered
+# bucket-policy statement (tests/integration/probe), and everything is
+# destroyed at the end of the file.
 #
 # aws_cloudfront_distribution waits for the distribution to reach the
 # Deployed state on both create and destroy by default (wait_for_deployment),
@@ -69,5 +72,50 @@ run "smoke" {
   assert {
     condition     = jsondecode(output.required_bucket_policy_json).Resource == "${run.setup.bucket_arn}/*"
     error_message = "required_bucket_policy_json's Resource must cover every object in the real fixture bucket."
+  }
+}
+
+# The OAC read path, end to end against the real distribution. The two runs
+# below share tests/integration/probe's state, so the second run adds the
+# bucket policy to the first run's (policy-free) probe.
+
+run "denies_reads_without_the_bucket_policy" {
+  module {
+    source = "./tests/integration/probe"
+  }
+
+  variables {
+    bucket_name                  = run.setup.bucket_name
+    bucket_policy_statement_json = run.smoke.required_bucket_policy_json
+    attach_bucket_policy         = false
+    url                          = "https://${run.smoke.domain_name}/${run.setup.probe_object_key}"
+  }
+
+  assert {
+    condition     = output.status_code == 403
+    error_message = "With no bucket policy the private origin must deny CloudFront's OAC request (403); anything else means the bucket is readable without the module's statement, or the probe is not exercising OAC."
+  }
+}
+
+run "serves_reads_with_the_rendered_bucket_policy" {
+  module {
+    source = "./tests/integration/probe"
+  }
+
+  variables {
+    bucket_name                  = run.setup.bucket_name
+    bucket_policy_statement_json = run.smoke.required_bucket_policy_json
+    attach_bucket_policy         = true
+    url                          = "https://${run.smoke.domain_name}/${run.setup.probe_object_key}"
+  }
+
+  assert {
+    condition     = output.bucket_policy_attached
+    error_message = "This run must attach the module's rendered statement as the bucket's only policy."
+  }
+
+  assert {
+    condition     = output.status_code == 200 && output.body == run.setup.probe_object_body
+    error_message = "With only the module's required_bucket_policy_json attached, the object must be served through the distribution (200, exact body). Failure means the rendered statement, including its AWS:SourceArn condition, does not actually grant this distribution's OAC read access."
   }
 }

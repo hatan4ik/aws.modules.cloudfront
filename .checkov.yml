@@ -4,6 +4,7 @@
 # policy scanning.
 skip-path:
   - tests/integration/setup
+  - tests/integration/probe
 
 # CKV_AWS_174 and CKV2_AWS_42 are verified false positives, not accepted
 # risk. This module renders viewer_certificate through two mutually
