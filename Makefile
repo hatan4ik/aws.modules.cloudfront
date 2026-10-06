@@ -4,10 +4,11 @@ SHELL := /bin/bash
 ROOT_DIRS     := .
 # Only example directories that contain Terraform, so a stray file under examples/ is ignored.
 EXAMPLE_DIRS  := $(sort $(patsubst %/,%,$(dir $(wildcard examples/*/*.tf))))
-# The smoke integration suite's throwaway S3 bucket fixture. It is not a
-# deployable pattern (see tests/integration/README.md) but still gets fmt,
-# validate, lint, and docs like every other directory.
-FIXTURE_DIRS  := tests/integration/setup tests/integration/probe
+# The smoke integration suite's throwaway S3 bucket fixture and the contract
+# tests' sibling statement-type fixture. They are not deployable patterns (see
+# tests/integration/README.md and tests/fixtures/sibling-statement-types) but
+# still get fmt, validate, lint, and docs like every other directory.
+FIXTURE_DIRS  := tests/integration/setup tests/integration/probe tests/fixtures/sibling-statement-types
 ALL_DIRS      := $(ROOT_DIRS) $(EXAMPLE_DIRS) $(FIXTURE_DIRS)
 TFLINT_CONFIG := $(CURDIR)/.tflint.hcl
 TFDOCS_CONFIG := $(CURDIR)/.terraform-docs.yml

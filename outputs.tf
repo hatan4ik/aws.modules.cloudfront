@@ -32,3 +32,13 @@ output "required_kms_key_policy_json" {
   description = "The KMS key-policy STATEMENT (not a full policy document) the origin bucket's encryption key needs when objects are encrypted with SSE-KMS (aws:kms or aws:kms:dsse) under a CUSTOMER MANAGED key, as a JSON string: grants cloudfront.amazonaws.com kms:Decrypt, scoped by Condition.StringEquals[\"AWS:SourceArn\"] to this distribution's own ARN. Add it (jsondecode it first) to that key's policy. Not needed for SSE-S3 (AES256). It cannot be used with the AWS managed aws/s3 key, whose key policy cannot be edited: OAC cannot read objects encrypted under aws/s3, so use a customer managed key or SSE-S3 instead (aws.modules.s3 defaults to aws:kms with aws/s3 when kms_key_arn is null). Without this statement CloudFront fails closed: every object request returns 403 AccessDenied."
   value       = jsonencode(local.kms_key_policy_statement)
 }
+
+output "required_bucket_policy_statement" {
+  description = "The same origin-read grant as required_bucket_policy_json (same Sid, principal, action, resource, and AWS:SourceArn condition, derived from the same local), but as a plain object keyed by its Sid in exactly the map-entry shape of aws.modules.s3's bucket_policy_statements input, so it needs no translation: bucket_policy_statements = merge(module.distribution.required_bucket_policy_statement, { ...other statements... })."
+  value       = local.typed_policy_statements.bucket
+}
+
+output "required_kms_key_policy_statement" {
+  description = "The same kms:Decrypt grant as required_kms_key_policy_json (same Sid, principal, action, Resource \"*\", and AWS:SourceArn condition, derived from the same local), but as a plain object keyed by its Sid in exactly the map-entry shape of aws.modules.kms's policy_statements input (modules/key-policy's statements), so it needs no translation: policy_statements = merge(module.distribution.required_kms_key_policy_statement, { ...other statements... }). Same caveats as the JSON output: only for a customer managed key, never the AWS managed aws/s3 key."
+  value       = local.typed_policy_statements.kms_key
+}

@@ -41,7 +41,7 @@ locals {
   ]
 
   # The bucket-side statement the caller must merge into the origin bucket's
-  # policy (aws.modules.s3's additional_bucket_policy_statements, or a plain
+  # policy (aws.modules.s3's bucket_policy_statements, or a plain
   # aws_s3_bucket_policy). Scoped to this distribution's own ARN so no other
   # distribution in the account can read the bucket through the same OAC
   # service principal; see docs/DESIGN.md for why AWS:SourceArn is required.
@@ -74,6 +74,41 @@ locals {
     Condition = {
       StringEquals = {
         "AWS:SourceArn" = aws_cloudfront_distribution.this.arn
+      }
+    }
+  }
+
+  # The same two grants reshaped into the typed statement objects the sibling
+  # modules take, keyed by Sid: aws.modules.s3's bucket_policy_statements and
+  # aws.modules.kms's policy_statements (modules/key-policy's statements). Both
+  # are map(object({ effect, principals = map(set(string)), actions,
+  # resources, conditions = list({ test, variable, values }) })). Derived
+  # mechanically FROM the raw statements above, not computed a second time, so
+  # the JSON outputs and the typed outputs cannot drift: Principal { type =
+  # id } becomes principals { type = [id] }, Action and Resource become
+  # one-element lists, and Condition { test = { variable = value } } becomes
+  # one { test, variable, values = [value] } entry per pair. See
+  # docs/DESIGN.md "Typed statement outputs for aws.modules.s3 and
+  # aws.modules.kms".
+  typed_policy_statements = {
+    for grant, statement in {
+      bucket  = local.bucket_policy_statement
+      kms_key = local.kms_key_policy_statement
+      } : grant => {
+      (statement.Sid) = {
+        effect     = statement.Effect
+        principals = { for type, identifiers in statement.Principal : type => flatten([identifiers]) }
+        actions    = flatten([statement.Action])
+        resources  = flatten([statement.Resource])
+        conditions = flatten([
+          for test, pairs in statement.Condition : [
+            for variable, values in pairs : {
+              test     = test
+              variable = variable
+              values   = flatten([values])
+            }
+          ]
+        ])
       }
     }
   }
