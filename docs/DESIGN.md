@@ -168,7 +168,7 @@ against the default would wrongly reject an account with a raised quota.
   `required_bucket_policy_json`'s `Resource`.
 - `partition` — optional; falls back to `data.aws_partition` only to render
   `required_bucket_policy_json`'s `Resource` ARN. The one documented
-  exception to "no data sources," following `aws.modules.ksm`'s precedent for
+  exception to "no data sources," following `aws.modules.kms`'s precedent for
   the same reasoning. Only `aws` is accepted (a validation on the input and a
   resource precondition on the looked-up value), since v2.0.0. v1.x accepted
   any partition while always returning the standard partition's
