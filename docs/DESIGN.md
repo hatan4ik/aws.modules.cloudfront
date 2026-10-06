@@ -36,11 +36,11 @@ It deliberately does **not**:
   reach into a bucket it does not own to attach one, so instead it renders
   the exact statement the bucket needs (`required_bucket_policy_json`) and
   leaves the caller to merge it in, through a plain `aws_s3_bucket_policy`
-  (`jsondecode` the statement into its `Statement` list) or by translating it
-  into `aws.modules.s3`'s own `bucket_policy_statements` input, whose
-  `principals` and `conditions` fields have a different shape than raw IAM
-  JSON and so cannot be merged in directly. See the README's Quick start for
-  both patterns worked out in full.
+  (`jsondecode` the statement into its `Statement` list) or, for
+  `aws.modules.s3`'s own typed `bucket_policy_statements` input, through the
+  same grant pre-shaped as `required_bucket_policy_statement` (see "Typed
+  statement outputs for aws.modules.s3 and aws.modules.kms" below). See the
+  README's Quick start for both patterns worked out in full.
 - Serve a second, ALB-backed origin type. See "Deferred to v2" below.
 - Request the viewer certificate or the WAF Web ACL. Both are separate
   resources with their own lifecycle (`aws.modules.acm`,
@@ -152,6 +152,69 @@ AWS-owned and cannot be edited, so no statement can grant CloudFront
 which is safe but invisible at plan and apply time; the README documents how
 to detect it, and the integration suite exercises the read path end to end.
 
+## Typed statement outputs for aws.modules.s3 and aws.modules.kms
+
+Decision (2026-10-06, additive, non-breaking): render each of the two grants
+twice — as the existing raw-JSON outputs and as new typed outputs,
+`required_bucket_policy_statement` and `required_kms_key_policy_statement`.
+
+**The gap.** Comparing this module's outputs with the sibling inputs they feed,
+as defined in the current sources, showed the shapes are incompatible.
+`required_bucket_policy_json` is `jsonencode` of a raw IAM statement
+(`Principal = { Service = "..." }`, scalar `Action` and `Resource`,
+`Condition = { StringEquals = { "AWS:SourceArn" = "..." } }`).
+`aws.modules.s3`'s `bucket_policy_statements` is a Sid-keyed
+`map(object({ effect, principals = map(set(string)), principal_all,
+actions = set(string), resources = optional(set(string)),
+conditions = list(object({ test, variable, values = set(string) })) }))`.
+`aws.modules.kms`'s `policy_statements` (its `modules/key-policy` `statements`)
+has the same structure without `principal_all`, with `principals` required
+and `resources` defaulting to `["*"]`. A caller composing the fleet therefore
+had to `jsondecode` the output and rebuild the object by hand — a translation
+tax every caller pays and can get subtly wrong. The README's own earlier
+hand translation shows how easily: it omitted `resources`, which in
+`aws.modules.s3` defaults to the whole bucket and its objects, silently
+widening the grant beyond `origin_path` and onto the bucket ARN itself.
+
+**Why the KMS bridge too.** The two sibling statement types are structurally
+the same (`effect`, `principals` by type, `actions`, `resources`,
+`{ test, variable, values }` conditions), so the KMS statement maps onto
+`policy_statements` with no forced fit: its Sid
+(`AllowCloudFrontServicePrincipalSSEKMSDecrypt`) is alphanumeric and not a
+generated Sid, `principals` is non-empty, and `Resource "*"` is exactly the
+input's default meaning ("the key this policy is attached to"). The extra
+`principal_all` field on the S3 side is optional and correctly defaults to
+`false`.
+
+**One source, two shapes.** `local.typed_policy_statements` is derived
+mechanically from `local.bucket_policy_statement` and
+`local.kms_key_policy_statement`, the same locals the JSON outputs encode:
+`Principal { type = id }` becomes `principals { type = [id] }`, `Action` and
+`Resource` become one-element lists, and each `Condition { test = { variable
+= value } }` pair becomes one `{ test, variable, values = [value] }` entry.
+Nothing is computed a second time, so the shapes cannot drift; changing a
+grant means changing the one raw statement. The typed outputs always set
+`resources` explicitly so the sibling default can never widen them.
+
+**Why the JSON outputs stay.** They are not deprecated. Raw IAM JSON is the
+right shape for every caller outside this module fleet — a hand-written
+`aws_s3_bucket_policy` or `aws_kms_key_policy`, `aws_iam_policy_document`'s
+`source_policy_documents`, a bucket or key owned by another team's tooling —
+and existing callers may already `jsondecode` it. Removing or reshaping it
+would be a breaking change with no benefit to them. The integration suite's
+probe also attaches the JSON form verbatim, so it remains the end-to-end
+tested shape.
+
+**How it is proved.** `tests/policy_statement_bridge.tftest.hcl` assigns both
+typed outputs, merged with an unrelated caller statement as the README shows,
+to literal copies of the two sibling input types declared in
+`tests/fixtures/sibling-statement-types` (so a shape either sibling would
+reject fails the test), then asserts every field of the converted value —
+effect, principals, `principal_all`, actions, resources, and the
+`AWS:SourceArn` condition — equals the `jsondecode`d JSON output. The copies
+must be kept in sync with the sibling modules by hand; this module's tests
+deliberately do not depend on another repository's source.
+
 ## Quotas
 
 CloudFront's default per-distribution quotas are 25 cache behaviors and 100
@@ -214,7 +277,9 @@ supplies their own managed or customer-managed policy ID.
 
 `distribution_id`, `distribution_arn`, `domain_name`, `hosted_zone_id`,
 `origin_access_control_id`, `required_bucket_policy_json`,
-`required_kms_key_policy_json`. `hosted_zone_id`
+`required_kms_key_policy_json`, and their typed twins
+`required_bucket_policy_statement` and `required_kms_key_policy_statement`
+(see "Typed statement outputs" above). `hosted_zone_id`
 is a fixed constant (`Z2FDTNDATAQYW2`), not a resource attribute lookup: it
 identifies "an alias target is a CloudFront distribution" to Route 53, the
 same value for every distribution in the standard `aws` partition (the only
@@ -289,8 +354,12 @@ root (one distribution, one origin, one OAC)
   blacklist, and their locations requirement); custom error responses
   (defaults and overrides); cache behavior defaults (the managed
   CachingOptimized policy ID applied when not overridden) and overrides;
-  both advisory checks; and the `AWS:SourceArn` bucket-policy statement,
-  including a caller-supplied `partition` and a non-empty `origin_path`.
+  both advisory checks; the `AWS:SourceArn` bucket-policy statement,
+  including a caller-supplied `partition` and a non-empty `origin_path`; and
+  the typed statement outputs' conversion to `aws.modules.s3`'s and
+  `aws.modules.kms`'s input types and field-by-field equality with the JSON
+  outputs (`tests/policy_statement_bridge.tftest.hcl`, also `command =
+  apply`).
 - Examples are initialized, validated, linted, and scanned in CI like every
   other directory in the quality matrix.
 - An integration suite (`tests/integration/smoke.tftest.hcl`) applies a real,

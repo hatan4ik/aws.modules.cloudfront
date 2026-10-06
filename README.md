@@ -6,7 +6,7 @@ Provisions **one** CloudFront distribution per module call, serving **one** priv
 
 What you get from `name` and `origin`, without setting anything else:
 
-- A private origin, read only through OAC. The bucket stays fully private; CloudFront authenticates to it with SigV4 through the Origin Access Control this module creates. This module cannot attach the bucket's own policy (it does not own the bucket), so it renders the exact statement the bucket needs — `required_bucket_policy_json` — for the caller to merge in. Getting that statement's `AWS:SourceArn` condition right, so only *this* distribution can read the bucket, is the module's most important correctness property; see [Security model](#security-model).
+- A private origin, read only through OAC. The bucket stays fully private; CloudFront authenticates to it with SigV4 through the Origin Access Control this module creates. This module cannot attach the bucket's own policy (it does not own the bucket), so it renders the exact statement the bucket needs for the caller to merge in, in two equivalent shapes: raw IAM JSON (`required_bucket_policy_json`) for a hand-written `aws_s3_bucket_policy`, and a typed object (`required_bucket_policy_statement`) that drops straight into `aws.modules.s3`'s `bucket_policy_statements` with no translation. Getting that statement's `AWS:SourceArn` condition right, so only *this* distribution can read the bucket, is the module's most important correctness property; see [Security model](#security-model).
 - Secure defaults. `TLSv1.2_2021` minimum protocol version, HTTPS-only viewer traffic (`redirect-to-https`), IPv6 enabled, `PriceClass_100` (the cheapest, US/Canada/Europe edge locations; wider distribution is an explicit opt-in).
 - One CloudFront default certificate, or one caller-supplied ACM certificate — never both, never neither. `aliases` empty uses `*.cloudfront.net`; `aliases` non-empty requires `viewer_certificate_arn`, validated to be an ACM ARN in `us-east-1`, the only region CloudFront ever reads viewer certificates from.
 - The `CachingOptimized` AWS managed cache policy by default for the default behavior and every additional `cache_behaviors` entry, so static content gets long TTLs and negotiated compression without picking a policy ID.
@@ -55,25 +55,20 @@ resource "aws_s3_bucket_policy" "origin" {
 
 This creates one distribution with every default: `PriceClass_100`, `index.html` as the default root object, the CloudFront default `*.cloudfront.net` certificate (no `aliases` set), the `CachingOptimized` managed cache policy, no WAF, no access logging (both advisory checks warn), and an OAC-only bucket policy scoped to this exact distribution's ARN.
 
-If `aws.modules.s3` already owns this bucket's policy through its own `bucket_policy_statements` input, translate the rendered statement into that input's typed shape instead of merging the raw JSON — the two shapes differ (`aws.modules.s3` takes `principals` as `map(set(string))` and `conditions` as a list of `{ test, variable, values }` objects, not a raw IAM `Principal`/`Condition` block):
+If `aws.modules.s3` owns this bucket's policy through its own `bucket_policy_statements` input, use `required_bucket_policy_statement` instead of the raw JSON. It is the same grant (same Sid, principal, action, origin-path-scoped resource, and `AWS:SourceArn` condition, derived from the same value), already keyed by its Sid and shaped exactly like one entry of that input (`principals` as `map(set(string))`, `conditions` as a list of `{ test, variable, values }` objects), so it merges in with no `jsondecode` and no hand translation:
 
 ```hcl
 module "origin_bucket" {
-  source = "git::https://github.com/hatan4ik/aws.modules.s3.git?ref=<commit-sha>" # v1.0.0
+  source = "git::https://github.com/hatan4ik/aws.modules.s3.git?ref=<commit-sha>" # v1.0.1
 
   bucket = "app-static-site"
 
-  bucket_policy_statements = {
-    AllowCloudFrontServicePrincipalReadOnly = {
-      principals = { Service = ["cloudfront.amazonaws.com"] }
-      actions    = ["s3:GetObject"]
-      conditions = [{
-        test     = "StringEquals"
-        variable = "AWS:SourceArn"
-        values   = [module.distribution.distribution_arn]
-      }]
-    }
-  }
+  bucket_policy_statements = merge(
+    module.distribution.required_bucket_policy_statement,
+    {
+      # ...this bucket's other statements, keyed by Sid...
+    },
+  )
 }
 ```
 
@@ -91,7 +86,20 @@ Point a Route 53 alias record at the distribution with `domain_name` and the fix
 | SSE-KMS under a **customer managed** key | Attach `required_bucket_policy_json` to the bucket **and** add `required_kms_key_policy_json` to the key's policy. |
 | SSE-KMS under the **AWS managed `aws/s3`** key (`aws.modules.s3`'s default) | **Not usable with OAC.** An AWS managed key's policy cannot be edited, so CloudFront can never be granted `kms:Decrypt` on it. Use a customer managed key (`kms_key_arn`) or `sse_algorithm = "AES256"` for the origin bucket. |
 
-`required_kms_key_policy_json` grants `cloudfront.amazonaws.com` only `kms:Decrypt` (the distribution only reads), scoped by the same `AWS:SourceArn` condition as the bucket statement, so no other distribution can decrypt with the key:
+`required_kms_key_policy_json` grants `cloudfront.amazonaws.com` only `kms:Decrypt` (the distribution only reads), scoped by the same `AWS:SourceArn` condition as the bucket statement, so no other distribution can decrypt with the key. If the key comes from `aws.modules.kms`, merge the typed twin `required_kms_key_policy_statement` into its `policy_statements` input, again with no translation:
+
+```hcl
+module "origin_key" {
+  source = "git::https://github.com/hatan4ik/aws.modules.kms.git?ref=<commit-sha>" # v1.0.0
+
+  description = "Origin bucket key for app-static-site"
+
+  key_administrator_arns = ["arn:aws:iam::123456789012:role/platform/kms-admin"]
+  policy_statements      = module.distribution.required_kms_key_policy_statement
+}
+```
+
+As with the bucket, this introduces no cycle: the key depends on the distribution's ARN, the distribution depends only on the bucket itself (`aws_s3_bucket`), and only the bucket's separate encryption configuration depends on the key. For a key managed any other way, attach the raw JSON:
 
 ```hcl
 data "aws_iam_policy_document" "origin_key" {
@@ -148,7 +156,9 @@ root (one distribution, one origin, one OAC)
 │                  preconditions for the alias/certificate rule.
 ├── checks.tf      Advisory: access_logging_disabled, web_acl_not_attached.
 └── outputs.tf     Identity, the fixed hosted zone ID, required_bucket_policy_json,
-                   required_kms_key_policy_json.
+                   required_kms_key_policy_json, and their typed twins
+                   required_bucket_policy_statement and
+                   required_kms_key_policy_statement.
 ```
 
 `cache_behaviors` is an ordered **list** of objects, each with its own `path_pattern`. CloudFront evaluates ordered cache behaviors in the order it receives them and uses the **first** one whose pattern matches, so the list order is the precedence order: list a narrower pattern (`/static/images/*`) before a broader one that also matches it (`/static/*`), or the narrower one never matches. (v1.x took a map keyed by `path_pattern`, which rendered in lexical key order regardless of intent; see [docs/UPGRADE-2.0.md](docs/UPGRADE-2.0.md).) `path_pattern` must be non-empty and unique, and `"*"` is rejected because it is reserved for `default_cache_behavior`, configured as a separate input entirely. Both share the same settings (`allowed_methods`, `cached_methods`, `cache_policy_id`, `compress`), so a path pattern's behavior can be promoted to the default behavior, or vice versa, by moving the object (minus `path_pattern`), not rewriting it. `cache_policy_id` left `null` in either resolves to the AWS managed `CachingOptimized` policy (`658327ea-f89d-4fab-a63d-7e88639e58f6`).
@@ -190,7 +200,7 @@ Not created here
 
 Two layers, deliberately separate:
 
-- **Contract tests** (`tests/`, run by `make test` and by CI) use `mock_provider` with `command = plan`, except `tests/bucket_policy.tftest.hcl`, which needs `command = apply` because `required_bucket_policy_json` is rendered from the distribution's ARN, unknown at plan time for a fresh create. 66 tests cover secure defaults, every validation and precondition (through `expect_failures`), real-shaped CLOUDFRONT-scope WAF ARNs, the default vs. custom-domain viewer certificate paths, geo restriction, custom error responses, cache behavior defaults, overrides, and list-order precedence, both advisory checks, and the `AWS:SourceArn` bucket-policy and KMS key-policy statements. The integration suite additionally fetches an object through the real distribution with and without the bucket policy.
+- **Contract tests** (`tests/`, run by `make test` and by CI) use `mock_provider` with `command = plan`, except `tests/bucket_policy.tftest.hcl` and `tests/policy_statement_bridge.tftest.hcl`, which need `command = apply` because `required_bucket_policy_json` is rendered from the distribution's ARN, unknown at plan time for a fresh create. 69 tests cover secure defaults, every validation and precondition (through `expect_failures`), real-shaped CLOUDFRONT-scope WAF ARNs, the default vs. custom-domain viewer certificate paths, geo restriction, custom error responses, cache behavior defaults, overrides, and list-order precedence, both advisory checks, the `AWS:SourceArn` bucket-policy and KMS key-policy statements, and the typed `*_statement` outputs' conversion to `aws.modules.s3`'s and `aws.modules.kms`'s statement input types with field-by-field equality to the JSON outputs. The integration suite additionally fetches an object through the real distribution with and without the bucket policy.
 - **Integration suite** (`tests/integration/`, run by `make integration-smoke` or the dispatch-only `integration` workflow) applies the module for real in **your** account: a disposable, private S3 bucket fixture (created plainly, not through `aws.modules.s3`, to keep the fixture minimal — this module's own tests must not depend on another module's interface), a minimal distribution against it, real-API assertions including the `AWS:SourceArn` condition again, then teardown. CloudFront distributions are slow both to create and to delete in real AWS (commonly 15-25 minutes each way, since `aws_cloudfront_distribution` waits for the `Deployed` state by default) — see [tests/integration/README.md](tests/integration/README.md) for why that is expected, not a hang.
 
 ## Design principles
@@ -297,8 +307,8 @@ No modules.
 | <a name="output_domain_name"></a> [domain\_name](#output\_domain\_name) | Distribution's own *.cloudfront.net domain name. Use this, or a custom alias, as the target of a DNS record. |
 | <a name="output_hosted_zone_id"></a> [hosted\_zone\_id](#output\_hosted\_zone\_id) | CloudFront's fixed alias-target hosted zone ID (Z2FDTNDATAQYW2 in the standard aws partition), for a Route 53 alias record via aws.modules.route53. It identifies CloudFront as an alias target class, not a zone this distribution owns. |
 | <a name="output_origin_access_control_id"></a> [origin\_access\_control\_id](#output\_origin\_access\_control\_id) | ID of the Origin Access Control this distribution reads the S3 origin through. |
-| <a name="output_required_bucket_policy_json"></a> [required\_bucket\_policy\_json](#output\_required\_bucket\_policy\_json) | The exact IAM policy STATEMENT (not a full policy document) the origin bucket needs, as a JSON string: grants cloudfront.amazonaws.com s3:GetObject on the origin path, scoped by a Condition.StringEquals["AWS:SourceArn"] to this distribution's own ARN. Merge it (jsondecode it first) into a standalone aws\_s3\_bucket\_policy's statement list, or translate it into aws.modules.s3's own typed bucket\_policy\_statements input (its principals and conditions fields have a different shape than raw IAM JSON); this module cannot attach it itself because it does not own the bucket. A missing or wrong SourceArn here would let any CloudFront distribution in the account read the bucket, not just this one. |
+| <a name="output_required_bucket_policy_json"></a> [required\_bucket\_policy\_json](#output\_required\_bucket\_policy\_json) | The exact IAM policy STATEMENT (not a full policy document) the origin bucket needs, as a JSON string: grants cloudfront.amazonaws.com s3:GetObject on the origin path, scoped by a Condition.StringEquals["AWS:SourceArn"] to this distribution's own ARN. Merge it (jsondecode it first) into a standalone aws\_s3\_bucket\_policy's statement list; for aws.modules.s3's typed bucket\_policy\_statements input use required\_bucket\_policy\_statement instead, the same grant already in that shape. This module cannot attach it itself because it does not own the bucket. A missing or wrong SourceArn here would let any CloudFront distribution in the account read the bucket, not just this one. |
 | <a name="output_required_bucket_policy_statement"></a> [required\_bucket\_policy\_statement](#output\_required\_bucket\_policy\_statement) | The same origin-read grant as required\_bucket\_policy\_json (same Sid, principal, action, resource, and AWS:SourceArn condition, derived from the same local), but as a plain object keyed by its Sid in exactly the map-entry shape of aws.modules.s3's bucket\_policy\_statements input, so it needs no translation: bucket\_policy\_statements = merge(module.distribution.required\_bucket\_policy\_statement, { ...other statements... }). |
-| <a name="output_required_kms_key_policy_json"></a> [required\_kms\_key\_policy\_json](#output\_required\_kms\_key\_policy\_json) | The KMS key-policy STATEMENT (not a full policy document) the origin bucket's encryption key needs when objects are encrypted with SSE-KMS (aws:kms or aws:kms:dsse) under a CUSTOMER MANAGED key, as a JSON string: grants cloudfront.amazonaws.com kms:Decrypt, scoped by Condition.StringEquals["AWS:SourceArn"] to this distribution's own ARN. Add it (jsondecode it first) to that key's policy. Not needed for SSE-S3 (AES256). It cannot be used with the AWS managed aws/s3 key, whose key policy cannot be edited: OAC cannot read objects encrypted under aws/s3, so use a customer managed key or SSE-S3 instead (aws.modules.s3 defaults to aws:kms with aws/s3 when kms\_key\_arn is null). Without this statement CloudFront fails closed: every object request returns 403 AccessDenied. |
+| <a name="output_required_kms_key_policy_json"></a> [required\_kms\_key\_policy\_json](#output\_required\_kms\_key\_policy\_json) | The KMS key-policy STATEMENT (not a full policy document) the origin bucket's encryption key needs when objects are encrypted with SSE-KMS (aws:kms or aws:kms:dsse) under a CUSTOMER MANAGED key, as a JSON string: grants cloudfront.amazonaws.com kms:Decrypt, scoped by Condition.StringEquals["AWS:SourceArn"] to this distribution's own ARN. Add it (jsondecode it first) to that key's policy; for aws.modules.kms's typed policy\_statements input use required\_kms\_key\_policy\_statement instead, the same grant already in that shape. Not needed for SSE-S3 (AES256). It cannot be used with the AWS managed aws/s3 key, whose key policy cannot be edited: OAC cannot read objects encrypted under aws/s3, so use a customer managed key or SSE-S3 instead (aws.modules.s3 defaults to aws:kms with aws/s3 when kms\_key\_arn is null). Without this statement CloudFront fails closed: every object request returns 403 AccessDenied. |
 | <a name="output_required_kms_key_policy_statement"></a> [required\_kms\_key\_policy\_statement](#output\_required\_kms\_key\_policy\_statement) | The same kms:Decrypt grant as required\_kms\_key\_policy\_json (same Sid, principal, action, Resource "*", and AWS:SourceArn condition, derived from the same local), but as a plain object keyed by its Sid in exactly the map-entry shape of aws.modules.kms's policy\_statements input (modules/key-policy's statements), so it needs no translation: policy\_statements = merge(module.distribution.required\_kms\_key\_policy\_statement, { ...other statements... }). Same caveats as the JSON output: only for a customer managed key, never the AWS managed aws/s3 key. |
 <!-- END_TF_DOCS -->
