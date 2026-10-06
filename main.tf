@@ -35,12 +35,13 @@ resource "aws_cloudfront_distribution" "this" {
   }
 
   default_cache_behavior {
-    target_origin_id       = var.origin.bucket_name
-    viewer_protocol_policy = "redirect-to-https"
-    allowed_methods        = sort(tolist(local.default_cache_behavior.allowed_methods))
-    cached_methods         = sort(tolist(local.default_cache_behavior.cached_methods))
-    cache_policy_id        = local.default_cache_behavior.cache_policy_id
-    compress               = local.default_cache_behavior.compress
+    target_origin_id           = var.origin.bucket_name
+    viewer_protocol_policy     = "redirect-to-https"
+    allowed_methods            = sort(tolist(local.default_cache_behavior.allowed_methods))
+    cached_methods             = sort(tolist(local.default_cache_behavior.cached_methods))
+    cache_policy_id            = local.default_cache_behavior.cache_policy_id
+    response_headers_policy_id = local.default_cache_behavior.response_headers_policy_id
+    compress                   = local.default_cache_behavior.compress
   }
 
   # Iterates a list, so behaviors render in the caller's declared order,
@@ -49,13 +50,14 @@ resource "aws_cloudfront_distribution" "this" {
     for_each = local.cache_behaviors
 
     content {
-      path_pattern           = ordered_cache_behavior.value.path_pattern
-      target_origin_id       = var.origin.bucket_name
-      viewer_protocol_policy = "redirect-to-https"
-      allowed_methods        = sort(tolist(ordered_cache_behavior.value.allowed_methods))
-      cached_methods         = sort(tolist(ordered_cache_behavior.value.cached_methods))
-      cache_policy_id        = ordered_cache_behavior.value.cache_policy_id
-      compress               = ordered_cache_behavior.value.compress
+      path_pattern               = ordered_cache_behavior.value.path_pattern
+      target_origin_id           = var.origin.bucket_name
+      viewer_protocol_policy     = "redirect-to-https"
+      allowed_methods            = sort(tolist(ordered_cache_behavior.value.allowed_methods))
+      cached_methods             = sort(tolist(ordered_cache_behavior.value.cached_methods))
+      cache_policy_id            = ordered_cache_behavior.value.cache_policy_id
+      response_headers_policy_id = ordered_cache_behavior.value.response_headers_policy_id
+      compress                   = ordered_cache_behavior.value.compress
     }
   }
 
