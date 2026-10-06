@@ -48,6 +48,11 @@ run "creates_a_distribution_with_secure_defaults" {
   }
 
   assert {
+    condition     = aws_cloudfront_distribution.this.default_cache_behavior[0].response_headers_policy_id == "67f7725c-6f97-4210-82d7-5512b31e9d03"
+    error_message = "The default behavior must attach AWS's managed SecurityHeadersPolicy."
+  }
+
+  assert {
     condition     = toset(aws_cloudfront_distribution.this.default_cache_behavior[0].allowed_methods) == toset(["GET", "HEAD"]) && toset(aws_cloudfront_distribution.this.default_cache_behavior[0].cached_methods) == toset(["GET", "HEAD"])
     error_message = "Default cache behavior methods must default to GET and HEAD."
   }

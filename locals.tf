@@ -17,13 +17,19 @@ locals {
   # compression negotiated), the sane default for static content.
   caching_optimized_policy_id = "658327ea-f89d-4fab-a63d-7e88639e58f6"
 
+  # AWS managed response headers policy "SecurityHeadersPolicy". It adds
+  # HSTS, nosniff, SAMEORIGIN, a strict referrer policy, and the legacy XSS
+  # protection header without creating a policy per distribution.
+  security_headers_policy_id = "67f7725c-6f97-4210-82d7-5512b31e9d03"
+
   has_aliases = length(var.aliases) > 0
 
   default_cache_behavior = {
-    allowed_methods = var.default_cache_behavior.allowed_methods
-    cached_methods  = var.default_cache_behavior.cached_methods
-    cache_policy_id = coalesce(var.default_cache_behavior.cache_policy_id, local.caching_optimized_policy_id)
-    compress        = var.default_cache_behavior.compress
+    allowed_methods            = var.default_cache_behavior.allowed_methods
+    cached_methods             = var.default_cache_behavior.cached_methods
+    cache_policy_id            = coalesce(var.default_cache_behavior.cache_policy_id, local.caching_optimized_policy_id)
+    response_headers_policy_id = coalesce(var.default_cache_behavior.response_headers_policy_id, local.security_headers_policy_id)
+    compress                   = var.default_cache_behavior.compress
   }
 
   # A list, not a map: CloudFront matches the first ordered behavior whose
@@ -32,11 +38,12 @@ locals {
   # lexical key order instead).
   cache_behaviors = [
     for behavior in var.cache_behaviors : {
-      path_pattern    = behavior.path_pattern
-      allowed_methods = behavior.allowed_methods
-      cached_methods  = behavior.cached_methods
-      cache_policy_id = coalesce(behavior.cache_policy_id, local.caching_optimized_policy_id)
-      compress        = behavior.compress
+      path_pattern               = behavior.path_pattern
+      allowed_methods            = behavior.allowed_methods
+      cached_methods             = behavior.cached_methods
+      cache_policy_id            = coalesce(behavior.cache_policy_id, local.caching_optimized_policy_id)
+      response_headers_policy_id = coalesce(behavior.response_headers_policy_id, local.security_headers_policy_id)
+      compress                   = behavior.compress
     }
   ]
 

@@ -52,6 +52,11 @@ run "renders_one_ordered_cache_behavior_per_entry" {
   }
 
   assert {
+    condition     = alltrue([for behavior in aws_cloudfront_distribution.this.ordered_cache_behavior : behavior.response_headers_policy_id == "67f7725c-6f97-4210-82d7-5512b31e9d03"])
+    error_message = "Every ordered behavior must default to AWS's managed SecurityHeadersPolicy."
+  }
+
+  assert {
     condition     = alltrue([for behavior in aws_cloudfront_distribution.this.ordered_cache_behavior : behavior.target_origin_id == "static-site-origin" && behavior.viewer_protocol_policy == "redirect-to-https" && behavior.compress == true])
     error_message = "Every ordered cache behavior must target the single origin, redirect to HTTPS, and compress by default."
   }
@@ -127,6 +132,38 @@ run "honours_a_caller_supplied_cache_policy_id" {
     condition     = aws_cloudfront_distribution.this.ordered_cache_behavior[0].compress == false
     error_message = "compress = false must be honoured."
   }
+}
+
+run "honours_a_caller_supplied_response_headers_policy_id" {
+  command = plan
+
+  variables {
+    default_cache_behavior = {
+      response_headers_policy_id = "e61eb60c-9c35-4d20-a928-2b84e02af89c"
+    }
+    cache_behaviors = [{
+      path_pattern               = "/api/*"
+      response_headers_policy_id = "eaab4381-ed33-4a86-88ca-d9558dc6cd63"
+    }]
+  }
+
+  assert {
+    condition = (
+      aws_cloudfront_distribution.this.default_cache_behavior[0].response_headers_policy_id == "e61eb60c-9c35-4d20-a928-2b84e02af89c" &&
+      aws_cloudfront_distribution.this.ordered_cache_behavior[0].response_headers_policy_id == "eaab4381-ed33-4a86-88ca-d9558dc6cd63"
+    )
+    error_message = "Caller-supplied response headers policies must be preserved per behavior."
+  }
+}
+
+run "rejects_a_malformed_response_headers_policy_id" {
+  command = plan
+
+  variables {
+    default_cache_behavior = { response_headers_policy_id = "not-a-policy-id" }
+  }
+
+  expect_failures = [var.default_cache_behavior]
 }
 
 run "rejects_a_wildcard_path_pattern" {
